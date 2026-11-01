@@ -12,3 +12,5 @@ Release/
 *.log
 obj-msvc/
 .testdata/
+/out_*.ps
+/out_*.ts

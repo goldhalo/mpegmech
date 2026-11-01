@@ -142,8 +142,15 @@ void build_psm(Bytes& out, const std::vector<PsmStreamEntry>& streams,
     out.push_back(0x00);
 
     // 元素流映射
-    out.push_back(static_cast<std::uint8_t>((streams.size() >> 8) & 0xFF));
-    out.push_back(static_cast<std::uint8_t>(streams.size() & 0xFF));
+    //
+    // ★ elementary_stream_map_length 是**映射区的字节数**，不是流的条数。
+    //   每条 4 字节（stream_type + elementary_stream_id + info_length）。
+    //   早先按条数写（1 条 → 0x0001），解封装侧 `remaining >= 4` 永远不成立，
+    //   整张 PSM 被当成空表跳过 —— 表面看没问题（视频靠 0xE0 猜、AAC 靠
+    //   ADTS 同步字猜），实际 G.711 这种只能靠 PSM 认的流就彻底认不出来。
+    const std::size_t map_bytes = streams.size() * 4;
+    out.push_back(static_cast<std::uint8_t>((map_bytes >> 8) & 0xFF));
+    out.push_back(static_cast<std::uint8_t>(map_bytes & 0xFF));
 
     for (const auto& s : streams) {
         out.push_back(s.stream_type);
