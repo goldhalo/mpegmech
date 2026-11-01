@@ -4,6 +4,7 @@
 #include <mpegmech/muxer.hpp>
 
 #include "adts.hpp"
+#include "ts_muxer.hpp"
 #include "ps_muxer.hpp"
 
 #include <algorithm>
@@ -44,7 +45,18 @@ public:
         /// AAC 的 ADTS 参数（仅 audio + add_adts 时有效）
         detail::AacConfig        aac{};
         bool                     add_adts = false;
+
+        /// TS：PID + continuity_counter
+        std::uint16_t            pid = 0;
+        std::uint8_t             cc  = 0;
     };
+
+    // TS：PAT/PMT 的 cc
+    std::uint8_t pat_cc = 0;
+    std::uint8_t pmt_cc = 0;
+    std::uint64_t frames_since_psi = 0;
+    std::uint16_t pcr_pid = 0;
+    bool          ts_psi_sent_once = false;
 
     std::vector<StreamState> streams;
     detail::Bytes            buf;        ///< 组包缓冲（复用，减少分配）
@@ -72,6 +84,25 @@ public:
     }
 
     // ---- PS 专用 ----
+
+    /// 输出 PAT + PMT。
+    void emit_ts_psi()
+    {
+        std::vector<std::pair<std::uint16_t, std::uint16_t>> progs;
+        progs.emplace_back(cfg.program_number, cfg.pmt_pid);
+        detail::build_pat(buf, cfg.program_number, progs, 0, pat_cc);
+
+        std::vector<detail::TsEsEntry> es;
+        for (const auto& s : streams) {
+            es.push_back({stream_type_of(s.cfg.codec), s.pid});
+        }
+        detail::build_pmt(buf, cfg.program_number, cfg.pmt_pid,
+                          pcr_pid != 0 ? pcr_pid : (es.empty() ? 0 : es[0].elementary_pid),
+                          es, 0, pmt_cc);
+
+        ++stats.psi_sent;
+        frames_since_psi = 0;
+    }
 
     /// 输出"每个关键帧前都要带的"三件套。
     void emit_ps_headers()
@@ -133,16 +164,27 @@ public:
             return make_error_code(MpegErrc::malformed);
         }
 
-        // ★ 关键帧前必带三件套（GB28181 平台靠它定位帧边界）
-        //
-        //   音频没有"关键帧"概念（每帧都可独立解码），所以用 !sent_header
-        //   保证第一帧前一定带上。
-        const bool is_audio = !isVideo(st.cfg.codec);
-        if ((flags & FrameFlag::key) != FrameFlag::none || !st.sent_header) {
-            emit_ps_headers();
-            st.sent_header = true;
+        // ---- 容器相关的头部 ----
+        if (cfg.container == Container::ps) {
+            // PS：每个关键帧前带 PackHeader + SystemHeader + PSM
+            if ((flags & FrameFlag::key) != FrameFlag::none || !st.sent_header) {
+                emit_ps_headers();
+                st.sent_header = true;
+            }
+        } else {
+            // TS：PAT/PMT 按周期重发；第一帧前必发
+            ++frames_since_psi;
+            const std::size_t period = (cfg.psi_period_ms <= 0)
+                                           ? 0
+                                           : static_cast<std::size_t>(cfg.psi_period_ms / 40);
+            if (!st.sent_header || (period != 0 && frames_since_psi >= period)) {
+                emit_ts_psi();
+                st.sent_header = true;
+            } else if (!ts_psi_sent_once) {
+                emit_ts_psi();
+                ts_psi_sent_once = true;
+            }
         }
-        (void)is_audio;
 
         // ★ PS 的 PES **必须填真实长度**。
         //
@@ -150,18 +192,27 @@ public:
         //   整帧。但实测 ffmpeg 直接报 "could not find codec parameters" ——
         //   它不接受 PS 里的不定长 PES（不定长是 TS 的用法，那边靠 PUSI
         //   和 188 包边界分界，PS 没有这个机制）。
-        // AAC 需要补 ADTS 头（PS 里的 AAC 必须带，否则平台解不出）
+        // ---- 组装 PES ----
         std::size_t payload_len = es.size();
         if (st.add_adts) {
             payload_len += 7;
         }
 
-        detail::build_pes_header(buf, st.stream_id, pts, dts, payload_len,
+        std::vector<std::uint8_t> pes;
+        detail::build_pes_header(pes, st.stream_id, pts, dts, payload_len,
                                  /*explicit_len=*/true);
         if (st.add_adts) {
-            detail::build_adts_header(buf, st.aac, payload_len);
+            detail::build_adts_header(pes, st.aac, payload_len);
         }
-        buf.insert(buf.end(), es.begin(), es.end());
+        pes.insert(pes.end(), es.begin(), es.end());
+
+        if (cfg.container == Container::ps) {
+            buf.insert(buf.end(), pes.begin(), pes.end());
+        } else {
+            // TS：把整个 PES 切成 188 字节包
+            detail::write_ts_packets(buf, st.pid, pes.data(), pes.size(),
+                                     /*pusi=*/true, st.cc);
+        }
 
         st.last_pts = pts;
         st.has_pts  = true;
@@ -191,9 +242,6 @@ public:
         }
         if (sc.codec == Codec::unknown) {
             return make_error_code(MpegErrc::invalid_argument);
-        }
-        if (cfg.container != Container::ps) {
-            return make_error_code(MpegErrc::unsupported_container);
         }
 
         StreamState st;
@@ -226,8 +274,30 @@ public:
             }
         }
 
+        // TS：分配 PID（视频 0x0100 起，音频 0x0110 起）
+        if (cfg.container == Container::ts) {
+            if (sc.pid != 0) {
+                st.pid = sc.pid;
+            } else {
+                std::uint16_t base = isVideo(sc.codec) ? 0x0100 : 0x0110;
+                bool taken = true;
+                while (taken) {
+                    taken = false;
+                    for (const auto& e : streams) {
+                        if (e.pid == base) { ++base; taken = true; break; }
+                    }
+                }
+                st.pid = base;
+            }
+        }
+
         streams.push_back(std::move(st));
         out_id = streams.back().id;
+
+        // TS：第一条视频流默认当 PCR 载体
+        if (cfg.container == Container::ts && pcr_pid == 0 && isVideo(sc.codec)) {
+            pcr_pid = streams.back().pid;
+        }
         return {};
     }
 };

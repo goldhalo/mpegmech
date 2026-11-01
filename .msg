@@ -1,32 +1,47 @@
-feat: 音频支持（AAC + ADTS）+ 音视频混合 PS
+feat: TS 封装 + 解封装（H264/H265 + AAC，支持非整包输入）
 
-音频部分此前只有字段声明，没有实现。现在补齐：
+TS 是表驱动的：188 字节包本身不带"我是什么"，PID 0 的 PAT 指出 PMT
+在哪，PMT 再指出哪个 PID 是视频/音频。所以 TS 不能像 PS 那样靠起始码
+自同步，从流中间接入必须等一个 PSI 周期。
 
-  adts.hpp/cpp（120 行）
-    - parse_asc()        从 AudioSpecificConfig 解析 profile/采样率/声道
-    - build_adts_header() 生成 7 字节 ADTS 头（无 CRC）
-    - sampling_rate_of()  采样率索引 → Hz
+  ts_muxer.hpp/cpp
+    - crc32_mpeg2 / build_pat / build_pmt / write_ts_packets
+    - 首帧前必发 PAT+PMT，之后按 psi_period_ms 周期重发
 
-  Muxer 音频分支
-    - addStream 时若 codec==aac && add_adts，解析 ASC
-    - write 时补 7 字节 ADTS 头，PES 长度相应 +7
-    - 音频不做 IDR 扫描（没有关键帧概念）
+  Muxer 的 TS 分支
+    - PID 自动分配（视频 0x0100 起，音频 0x0110 起）
+    - PCR 按 pcr_period_ms 插在 PCR_PID 的包上（默认取第一条视频流）
+    - PES 长度 > 0xFFFF 时写 0（不定长），这是 TS 允许的用法
 
-又一个"少写一个字节"的 bug：
+  ts_demuxer.hpp/cpp（新增，与 PS 路径完全分开）
+    - 同步：连续 3 个 0x47 且间隔 188
+    - 状态机：searching -> waiting_psi -> ready
+    - 按 PID 各攒一份 PES，长度可知就收满即出，长度 0 等下一条 PUSI
 
-  PSM 的 program_stream_info_length 是 **16 位**，我只写了 1 个字节。
-  后面所有字段错位 1 字节，ffmpeg 把 AAC 的 stream_type(0x0F) 读成
-  别的值，认成 mp3 / mp2，还报 "Header missing" —— 看起来像 ADTS 头
-  写错了，实际是它根本没读到 PSM 的正确位置。
+三个实现时踩到的坑（都已写进设计文档 6.1）：
 
-验证：
+1) PMT 的 program_info_length 在偏移 10，不是 12。
+   从 12 读，读到的其实是第一条 ES 的 stream_type，然后整条 PMT 的
+   ES 循环被整个跳过。症状极隐蔽：状态机进了 ready、resyncs 和
+   parse_errors 全是 0，但一帧都出不来 —— 统计健康，数据为空。
 
-  test_av_mux        H264 + AAC → PS
-                     ffprobe: video=h264 / audio=aac
-                     ffmpeg 解码零错误
+2) PES 收尾不能只等 PUSI。TS 最后一包会用 adaptation field 填到 188，
+   payload 尾部带 stuffing，直接取到包尾会把垃圾塞进 ES。长度可知时
+   按 6+PES_packet_length 裁剪。
 
-  test_av_roundtrip  H264 + AAC → PS → 解回
-                     视频 75 帧 / 音频 88 帧，帧数一致
-                     视频逐字节一致
-                     音频 payload = 7 字节 ADTS + 原始裸帧
-                     stream 回调恰好 2 次（两个流各一次）
+3) 一条 PES 里常有几十个 ADTS 帧。ffmpeg 打的 TS 里 88 个 AAC 帧挤在
+   6 条 PES 里，按 PES 边界整段交出，调用方拿到的就是"一坨 ADTS"。
+   现在按 ADTS frame_length 拆成单帧，PTS 按 1024*90000/sample_rate 递增。
+
+test_ts_roundtrip.cpp：
+  - H264 -> TS -> 解回：75 帧，ES 逐字节一致，PTS 一致
+  - H265 -> TS -> 解回：同上
+  - 音视频混合：两路各自 75 / 88 帧，逐字节一致
+  - 中间接入（丢掉前 1200 字节）：解出 74 帧，全部与原始帧逐字节相同
+  - ffmpeg 打的 TS（PID 分配/描述符/PCR 都跟我们不同）：2 条流、
+    75 + 88 帧、resync=0、err=0
+
+交叉验证：
+  ffprobe 识别 h264 + aac；
+  ffmpeg -f null 完整解码零错误；
+  我们封的 TS 拿 ffmpeg 解、ffmpeg 封的 TS 拿我们解，双向都通。

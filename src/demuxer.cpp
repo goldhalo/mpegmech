@@ -1,5 +1,5 @@
 // =============================================================================
-//  demuxer.cpp —— 解封装（当前实现：PS）
+//  demuxer.cpp —— 解封装（PS + TS）
 // =============================================================================
 //  PS 是**起始码驱动**的，所以能自同步：
 //
@@ -7,6 +7,12 @@
 //
 //  从流中间接入时，扫到第一个 `00 00 01 BA` 就开始工作 —— 这就是为什么
 //  PS 允许"非开头输入"，而 TS 必须等 PAT/PMT。
+//
+//  TS 是**表驱动**的：188 字节包本身不带"我是什么"的信息，PID 0 的 PAT
+//  告诉你 PMT 在哪个 PID，PMT 再告诉你哪个 PID 是视频/音频。所以从流中间
+//  接入要等一个 PSI 周期（通常 100~500ms），这期间的数据只能丢。
+//  两条路径的公共部分只有"喂任意长度输入"和"回调帧/流"，其余完全分开，
+//  因此放在同一个 Impl 里按 `detected` 分叉，不强行抽象。
 // =============================================================================
 #include <mpegmech/demuxer.hpp>
 
@@ -15,9 +21,14 @@
 #include <map>
 #include <vector>
 
+#include "ts_demuxer.hpp"
+
 namespace mpegmech {
 
 namespace {
+
+/// 自动嗅探需要的字节数：TS 要连续 3 个 0x47（间隔 188），至少 564 字节。
+constexpr std::size_t kSniffBytes = 1024;
 
 std::size_t startcode_len(const std::uint8_t* p, std::size_t avail) noexcept
 {
@@ -73,6 +84,32 @@ Codec codec_by_stream_id(std::uint8_t sid) noexcept
 
 } // namespace
 
+/// ADTS 的 sampling_frequency_index → 采样率（索引 13/14 是保留值，15 是显式）。
+constexpr int kAdtsSamplingRate[13] = {
+    96000, 88200, 64000, 48000, 44100, 32000, 24000,
+    22050, 16000, 12000, 11025,  8000,  7350,
+};
+
+/// 视频帧是否关键帧（只看前 256 字节里的 NAL 头）。
+///
+/// @note 只用于**填标志位**，不参与解码判断。看不到 VCL 时保守返回 false，
+///       宁可少标也不要把非关键帧标成关键帧（下游可能据此丢帧）。
+bool looks_key(Codec codec, const std::uint8_t* p, std::size_t len) noexcept
+{
+    if (!isVideo(codec)) { return false; }
+    for (std::size_t i = 0; i + 5 < len && i < 256; ++i) {
+        if (p[i] == 0 && p[i + 1] == 0 && p[i + 2] == 1) {
+            if (codec == Codec::h264) {
+                if ((p[i + 3] & 0x1F) == 5) { return true; }        // IDR
+            } else if (codec == Codec::h265) {
+                const std::uint8_t t = (p[i + 3] >> 1) & 0x3F;
+                if (t >= 16 && t <= 21) { return true; }            // BLA..CRA
+            }
+        }
+    }
+    return false;
+}
+
 // =============================================================================
 //  Impl
 // =============================================================================
@@ -87,6 +124,14 @@ public:
     StreamCallback on_stream;
 
     DemuxStats stats;
+
+    /// 已确定的容器（`unknown` = 还没嗅探出来）。
+    Container detected = Container::unknown;
+
+    // ---- TS 专用状态 ----
+    detail::TsDemuxer            ts;
+    std::map<std::uint16_t, int> ts_pid_to_id;   ///< TS PID → 库内 stream_id
+    std::uint64_t                ts_frame_errors = 0;  ///< TS 路径下超长帧丢弃数
 
     enum class State { searching, synced };
     State state = State::searching;
@@ -194,6 +239,154 @@ public:
         on_frame(fi, span<const std::uint8_t>(payload, len));
     }
 
+    // ---- TS 路径 ----
+
+    /// 确保 TS 的某个 ES 有库内 stream_id，必要时触发 stream 回调。
+    int ensure_ts_stream(const detail::TsEsInfo& e)
+    {
+        auto it = ts_pid_to_id.find(e.pid);
+        if (it != ts_pid_to_id.end()) {
+            // PMT 更新后 stream_type 可能变（罕见，但流切换时会遇到）
+            const Codec c = codec_of(e.stream_type);
+            if (c != Codec::unknown && codecs[it->second] == Codec::unknown) {
+                codecs[it->second] = c;
+                if (on_stream) {
+                    StreamInfo si;
+                    si.stream_id = it->second;
+                    si.codec     = c;
+                    si.program   = 1;
+                    si.pid       = e.pid;
+                    on_stream(si);
+                }
+            }
+            return it->second;
+        }
+
+        const int id = next_stream_id++;
+        ts_pid_to_id[e.pid] = id;
+        codecs[id]          = codec_of(e.stream_type);
+
+        if (on_stream) {
+            StreamInfo si;
+            si.stream_id = id;
+            si.codec     = codecs[id];
+            si.program   = 1;
+            si.pid       = e.pid;
+            si.adts      = true;    // TS 里的 AAC 恒带 ADTS 头
+            on_stream(si);
+        }
+        return id;
+    }
+
+    /// 发出一个 TS 帧（统一填 FrameInfo、计统计）。
+    void push_ts_frame(int id, Codec codec, std::int64_t pts, std::int64_t dts,
+                       const std::uint8_t* p, std::size_t n)
+    {
+        if (n == 0) { return; }
+
+        FrameInfo fi;
+        fi.stream_id = id;
+        fi.codec     = codec;
+        fi.pts       = pts;
+        fi.dts      = dts;
+        fi.program   = 1;
+        if (isAudio(codec)) {
+            fi.flags = fi.flags | FrameFlag::key;      // 音频帧恒可作为起点
+        } else if (looks_key(codec, p, n)) {
+            fi.flags = fi.flags | FrameFlag::key;
+        }
+
+        ++stats.frames_out;
+        on_frame(fi, span<const std::uint8_t>(p, n));
+    }
+
+    /// 把 TS 解出的帧派发出去。
+    std::error_code dispatch_ts(std::vector<detail::TsDemuxer::Frame>& frames)
+    {
+        // 先把流表同步到最新。PMT 一定先于该 PID 的 PES 被解析，所以在这里
+        // 同步能保证"stream 回调早于该流的第一帧"这条契约。
+        for (const auto& e : ts.streams()) {
+            ensure_ts_stream(e);
+        }
+
+        for (auto& f : frames) {
+            if (f.payload.empty()) { continue; }
+
+            auto it = ts_pid_to_id.find(f.pid);
+            if (it == ts_pid_to_id.end()) { continue; }   // PMT 里没有的 PID
+
+            const int   id    = it->second;
+            const Codec codec = codecs[id];
+
+            // ---- AAC：一条 PES 里可能塞了多个 ADTS 帧 ----
+            //
+            //  我们自己的复用器是"一帧一 PES"，但 ffmpeg / 摄像机 / 平台侧
+            //  常常把几十个 AAC 帧攒成一条 PES（省包头）。若按 PES 边界整段
+            //  交出去，调用方拿到的是"一坨 ADTS"，播放器只能当一帧用。
+            //  这里按 ADTS 的 frame_length 拆开，PTS 按 1024 样本递增。
+            if (codec == Codec::aac) {
+                const std::size_t total = f.payload.size();
+                std::size_t i = 0;
+                std::int64_t pts = f.pts;
+                std::int64_t step = 0;
+
+                while (i + 7 <= total) {
+                    const std::uint8_t* h = f.payload.data() + i;
+                    if (h[0] != 0xFF || (h[1] & 0xF0) != 0xF0) { break; }
+                    const std::size_t flen =
+                        (static_cast<std::size_t>(h[3] & 0x03) << 11) |
+                        (static_cast<std::size_t>(h[4]) << 3) |
+                        ((h[5] >> 5) & 0x07);
+                    const std::size_t hdr = (h[1] & 0x01) ? 7u : 9u;
+                    if (flen < hdr || i + flen > total) { break; }
+
+                    if (step == 0) {
+                        const int idx = (h[2] >> 2) & 0x0F;
+                        const int rate = (idx < 13) ? kAdtsSamplingRate[idx] : 0;
+                        step = (rate > 0)
+                                   ? static_cast<std::int64_t>(1024) * kClockHz / rate
+                                   : 0;
+                    }
+                    if (flen > cfg.max_frame_bytes) { ++ts_frame_errors; }
+                    else { push_ts_frame(id, codec, pts, pts, h, flen); }
+
+                    if (pts != kNoTimestamp && step > 0) { pts += step; }
+                    i += flen;
+                }
+                if (i == 0) {   // 不是 ADTS：原样透传，别把数据吞掉
+                    if (total > cfg.max_frame_bytes) { ++ts_frame_errors; }
+                    else { push_ts_frame(id, codec, f.pts, f.dts,
+                                         f.payload.data(), total); }
+                }
+                continue;
+            }
+
+            if (f.payload.size() > cfg.max_frame_bytes) {
+                ++ts_frame_errors;
+                continue;
+            }
+            push_ts_frame(id, codec, f.pts, f.dts, f.payload.data(), f.payload.size());
+        }
+
+        stats.bytes_skipped = ts.bytes_skipped();
+        stats.resyncs       = ts.resyncs();
+        stats.parse_errors  = ts.bad_packets() + ts_frame_errors;
+
+        if (cfg.ts_max_resync_bytes != 0 &&
+            ts.state() == detail::TsSyncState::searching &&
+            ts.bytes_skipped() > cfg.ts_max_resync_bytes) {
+            return make_error_code(MpegErrc::sync_lost);
+        }
+        return {};
+    }
+
+    std::error_code feed_ts(const std::uint8_t* p, std::size_t n)
+    {
+        std::vector<detail::TsDemuxer::Frame> frames;
+        ts.feed(p, n, frames);
+        return dispatch_ts(frames);
+    }
+
     // ---- 主循环 ----
 
     std::error_code feed(span<const std::uint8_t> data)
@@ -201,8 +394,52 @@ public:
         if (failed) { return fail_ec; }
 
         if (!data.empty()) {
-            in.insert(in.end(), data.begin(), data.end());
             stats.bytes_in += data.size();
+        }
+
+        // ---- 1. 确定容器 ----
+        if (detected == Container::unknown && cfg.container != Container::unknown) {
+            detected = cfg.container;
+        }
+
+        if (detected == Container::unknown) {
+            // 攒够嗅探窗口再判。PS 的判据只要 4 字节（00 00 01 BA），
+            // 所以短流也能一次定下来；TS 要 564 字节，不足就继续等。
+            // 攒到 kSniffBytes 还认不出来，就按 PS 兜底（PS 的 PackHeader
+            // 一定在起始处，认不出来通常意味着调用方给的压根不是 PS/TS，
+            // 这时按 PS 试一遍更容易在统计里看到痕迹）。
+            if (!data.empty()) {
+                in.insert(in.end(), data.begin(), data.end());
+            }
+
+            detected = sniffContainer(span<const std::uint8_t>(in.data(), in.size()));
+            if (detected == Container::unknown) {
+                if (in.size() < kSniffBytes) { return {}; }
+                detected = Container::ps;
+            }
+
+            std::vector<std::uint8_t> pending;
+            pending.swap(in);
+            scan = 0;
+            if (detected == Container::ts) {
+                return feed_ts(pending.data(), pending.size());
+            }
+            return feed_ps(pending);
+        }
+
+        if (detected == Container::ts) {
+            return feed_ts(data.data(), data.size());
+        }
+
+        return feed_ps(data);
+    }
+
+    // ---- PS 路径 ----
+
+    std::error_code feed_ps(span<const std::uint8_t> data)
+    {
+        if (!data.empty()) {
+            in.insert(in.end(), data.begin(), data.end());
         }
 
         if (in.size() - scan > cfg.max_buffered_bytes) {
@@ -376,6 +613,17 @@ public:
 
     std::error_code flush()
     {
+        if (detected == Container::ts) {
+            // TS 侧：把每个 PID 未收完的 PES 交出去。
+            // 注意 emit_partial_on_flush 对 TS 不做区分 —— PES 边界是硬边界，
+            // 残留的那条要么是最后一条完整的，要么是被截断的；
+            // 后者带不全 ES 也没有帧标志可用，所以统一按"交出"处理，
+            // 由调用方按自己的容忍度决定丢不丢。
+            std::vector<detail::TsDemuxer::Frame> frames;
+            ts.flush(frames);
+            return dispatch_ts(frames);
+        }
+
         // 不吐残缺帧（emit_partial_on_flush=false 时的行为）
         if (cfg.emit_partial_on_flush) {
             // 剩余未解析的当作一帧
@@ -437,9 +685,26 @@ void Demuxer::reset() noexcept
     impl_->streams.clear();
     impl_->codecs.clear();
     impl_->next_stream_id = 0;
+    impl_->ts.reset();
+    impl_->ts_pid_to_id.clear();
+    impl_->ts_frame_errors = 0;
+    impl_->detected = impl_->cfg.container;   // 明确指定的保留，自动嗅探的重来
     impl_->stats = DemuxStats{};
     impl_->failed = false;
     impl_->fail_ec.clear();
+}
+
+Container Demuxer::container() const noexcept
+{
+    return impl_->detected;
+}
+
+std::size_t Demuxer::buffered() const noexcept
+{
+    if (impl_->detected == Container::ts) {
+        return impl_->ts.buffered();
+    }
+    return impl_->in.size() - impl_->scan;
 }
 
 bool Demuxer::failed() const noexcept
