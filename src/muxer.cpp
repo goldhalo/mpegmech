@@ -3,6 +3,7 @@
 // =============================================================================
 #include <mpegmech/muxer.hpp>
 
+#include "adts.hpp"
 #include "ps_muxer.hpp"
 
 #include <algorithm>
@@ -39,6 +40,10 @@ public:
         std::int64_t             last_pts = 0;
         bool                     has_pts = false;
         bool                     sent_header = false;
+
+        /// AAC 的 ADTS 参数（仅 audio + add_adts 时有效）
+        detail::AacConfig        aac{};
+        bool                     add_adts = false;
     };
 
     std::vector<StreamState> streams;
@@ -129,10 +134,15 @@ public:
         }
 
         // ★ 关键帧前必带三件套（GB28181 平台靠它定位帧边界）
+        //
+        //   音频没有"关键帧"概念（每帧都可独立解码），所以用 !sent_header
+        //   保证第一帧前一定带上。
+        const bool is_audio = !isVideo(st.cfg.codec);
         if ((flags & FrameFlag::key) != FrameFlag::none || !st.sent_header) {
             emit_ps_headers();
             st.sent_header = true;
         }
+        (void)is_audio;
 
         // ★ PS 的 PES **必须填真实长度**。
         //
@@ -140,8 +150,17 @@ public:
         //   整帧。但实测 ffmpeg 直接报 "could not find codec parameters" ——
         //   它不接受 PS 里的不定长 PES（不定长是 TS 的用法，那边靠 PUSI
         //   和 188 包边界分界，PS 没有这个机制）。
-        detail::build_pes_header(buf, st.stream_id, pts, dts, es.size(),
+        // AAC 需要补 ADTS 头（PS 里的 AAC 必须带，否则平台解不出）
+        std::size_t payload_len = es.size();
+        if (st.add_adts) {
+            payload_len += 7;
+        }
+
+        detail::build_pes_header(buf, st.stream_id, pts, dts, payload_len,
                                  /*explicit_len=*/true);
+        if (st.add_adts) {
+            detail::build_adts_header(buf, st.aac, payload_len);
+        }
         buf.insert(buf.end(), es.begin(), es.end());
 
         st.last_pts = pts;
@@ -192,6 +211,19 @@ public:
                 }
             }
             st.stream_id = base;
+        }
+
+        // AAC + add_adts：从 extradata（AudioSpecificConfig）解析 ADTS 参数
+        if (sc.codec == Codec::aac && sc.add_adts) {
+            st.add_adts = true;
+            st.aac = detail::parse_asc(sc.extradata.data(), sc.extradata.size());
+            if (!st.aac.valid) {
+                // ASC 缺失或不合法：退回默认（AAC-LC / 44.1k / 立体声）
+                st.aac.profile        = 2;
+                st.aac.sampling_index = 4;
+                st.aac.channel_config = 2;
+                st.aac.valid          = true;
+            }
         }
 
         streams.push_back(std::move(st));

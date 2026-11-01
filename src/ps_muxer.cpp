@@ -131,8 +131,14 @@ void build_psm(Bytes& out, const std::vector<PsmStreamEntry>& streams,
     out.push_back(0);
     out.push_back(0);
 
-    out.push_back(0xE0 | (version & 0x1F));                // current_next=1
-    out.push_back(0xFF);                                   // marker + program_stream_info_length = 0
+    // current_next_indicator(1) + reserved(2) + program_stream_map_version(5)
+    out.push_back(static_cast<std::uint8_t>(0xE0 | (version & 0x1F)));
+    // reserved(7) '1111111' + marker_bit(1) '1'
+    out.push_back(0xFF);
+    // ★ program_stream_info_length 是 **16 位**，必须写 2 个字节。
+    //   早先只写了 1 个字节，导致后面所有字段错位 —— ffmpeg 把 AAC 的
+    //   stream_type(0x0F) 读成了别的值，认成 mp3/mp2。
+    out.push_back(0x00);
     out.push_back(0x00);
 
     // 元素流映射
