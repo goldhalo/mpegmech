@@ -1,0 +1,10 @@
+build/
+build-*/
+out/
+bin/
+obj/
+x64/
+Debug/
+Release/
+.vs/
+*.user
