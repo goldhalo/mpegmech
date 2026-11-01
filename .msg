@@ -1,47 +1,25 @@
-feat: TS 封装 + 解封装（H264/H265 + AAC，支持非整包输入）
+chore: MSVC /W4 告警清零 + 测试素材目录可配置
 
-TS 是表驱动的：188 字节包本身不带"我是什么"，PID 0 的 PAT 指出 PMT
-在哪，PMT 再指出哪个 PID 是视频/音频。所以 TS 不能像 PS 那样靠起始码
-自同步，从流中间接入必须等一个 PSI 周期。
+MSVC 编译验证（cl 19.44.35207，/W4 /permissive- /utf-8 /MD /O2）：
+库的 9 个源文件零告警，测试程序链接通过并在 Windows 上跑通完整往返。
 
-  ts_muxer.hpp/cpp
-    - crc32_mpeg2 / build_pat / build_pmt / write_ts_packets
-    - 首帧前必发 PAT+PMT，之后按 psi_period_ms 周期重发
+修掉 4 个告警：
+  - C4099 × 3：Impl 在头文件里是 `struct`，cpp 里定义成 `class`。
+    统一成 `struct`（本来就是全 public 的内部实现，用 class 反而误导）。
+  - C4244 × 1：ps_muxer 里 `0xC0 | (bs_buffer_bound >> 8)` 是 uint32_t
+    表达式，隐式窄化成 uint8_t 会丢数据。补 static_cast。
 
-  Muxer 的 TS 分支
-    - PID 自动分配（视频 0x0100 起，音频 0x0110 起）
-    - PCR 按 pcr_period_ms 插在 PCR_PID 的包上（默认取第一条视频流）
-    - PES 长度 > 0xFFFF 时写 0（不定长），这是 TS 允许的用法
+CMakeLists 加 `/utf-8`：
+  源码是 UTF-8 含中文注释。cl 默认按 GBK 读，UTF-8 里某些汉字的末字节
+  正好是 0x5C（反斜杠），会被当成续行符把下一行吞掉，报一堆看不懂的
+  语法错误。这个坑 GCC 不暴露，只在 MSVC 上出现。
 
-  ts_demuxer.hpp/cpp（新增，与 PS 路径完全分开）
-    - 同步：连续 3 个 0x47 且间隔 188
-    - 状态机：searching -> waiting_psi -> ready
-    - 按 PID 各攒一份 PES，长度可知就收满即出，长度 0 等下一条 PUSI
+test_ts_roundtrip 的素材查找改成 $MPEGMECH_TEST_DATA → /tmp → 当前目录：
+  原来硬编码 /tmp，Windows 上四段全部"跳过"，跑了个寂寞。
+  现在可以把素材拷到任意目录、设一个环境变量就在 Windows 上验证。
+  产物（out_av.ts）也写到素材同目录。
 
-三个实现时踩到的坑（都已写进设计文档 6.1）：
-
-1) PMT 的 program_info_length 在偏移 10，不是 12。
-   从 12 读，读到的其实是第一条 ES 的 stream_type，然后整条 PMT 的
-   ES 循环被整个跳过。症状极隐蔽：状态机进了 ready、resyncs 和
-   parse_errors 全是 0，但一帧都出不来 —— 统计健康，数据为空。
-
-2) PES 收尾不能只等 PUSI。TS 最后一包会用 adaptation field 填到 188，
-   payload 尾部带 stuffing，直接取到包尾会把垃圾塞进 ES。长度可知时
-   按 6+PES_packet_length 裁剪。
-
-3) 一条 PES 里常有几十个 ADTS 帧。ffmpeg 打的 TS 里 88 个 AAC 帧挤在
-   6 条 PES 里，按 PES 边界整段交出，调用方拿到的就是"一坨 ADTS"。
-   现在按 ADTS frame_length 拆成单帧，PTS 按 1024*90000/sample_rate 递增。
-
-test_ts_roundtrip.cpp：
-  - H264 -> TS -> 解回：75 帧，ES 逐字节一致，PTS 一致
-  - H265 -> TS -> 解回：同上
-  - 音视频混合：两路各自 75 / 88 帧，逐字节一致
-  - 中间接入（丢掉前 1200 字节）：解出 74 帧，全部与原始帧逐字节相同
-  - ffmpeg 打的 TS（PID 分配/描述符/PCR 都跟我们不同）：2 条流、
-    75 + 88 帧、resync=0、err=0
-
-交叉验证：
-  ffprobe 识别 h264 + aac；
-  ffmpeg -f null 完整解码零错误；
-  我们封的 TS 拿 ffmpeg 解、ffmpeg 封的 TS 拿我们解，双向都通。
+实测结果（MSVC，素材放 D:\temp\mpegmech-data）：
+  H264 75/75、H265 75/75、AV 75+88、中间接入 74/74 逐字节一致、
+  ffmpeg 打的 TS 75+88 帧 resync=0 err=0 —— 与 Linux/gcc 结果完全一致
+  （同一份 TS 字节数也一致：99264 / 81592 / 147580）。

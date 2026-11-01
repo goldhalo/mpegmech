@@ -8,3 +8,7 @@ Debug/
 Release/
 .vs/
 *.user
+*.obj
+*.log
+obj-msvc/
+.testdata/

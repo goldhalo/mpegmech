@@ -25,7 +25,7 @@ constexpr std::uint32_t kDefaultMuxRate = 32u * 1000u * 1000u / 8u;
 //  Impl
 // =============================================================================
 
-class Muxer::Impl {
+struct Muxer::Impl {
 public:
     Impl(const MuxerConfig& c, OutputCallback cb)
         : cfg(c), on_out(std::move(cb)) {}

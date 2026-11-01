@@ -152,7 +152,7 @@ NalKind classify(std::uint8_t hdr, Codec codec, const std::uint8_t* payload,
 //  Impl
 // =============================================================================
 
-class EsSplitter::Impl {
+struct EsSplitter::Impl {
 public:
     explicit Impl(const Config& c) : cfg(c) {}
 

@@ -6,20 +6,23 @@
 //    2. PES_packet_length == 0 的不定长 PES（大帧，>64 KiB）
 //    3. 从流中间接入（丢掉开头的 PAT/PMT，必须靠下一个 PSI 周期恢复）
 //
-//  素材（缺失时对应小节自动跳过）：
-//    /tmp/test_h264_aud.h264   带 AUD 的 H.264 裸流
-//    /tmp/test_nob.h265        H.265 裸流
-//    /tmp/test.aac             ADTS 封装的 AAC
-//    /tmp/ff_av.ts             ffmpeg 打的 TS，用来验证"能读别人的流"：
-//        ffmpeg -y -i /tmp/test_h264_aud.h264 -i /tmp/test.aac \
-//               -c copy -map 0:v -map 1:a /tmp/ff_av.ts
+//  素材（缺失时对应小节自动跳过）。查找顺序：
+//    $MPEGMECH_TEST_DATA → /tmp → 当前目录
+//    test_h264_aud.h264   带 AUD 的 H.264 裸流
+//    test_nob.h265        H.265 裸流
+//    test.aac             ADTS 封装的 AAC
+//    ff_av.ts             ffmpeg 打的 TS，用来验证"能读别人的流"：
+//        ffmpeg -y -i test_h264_aud.h264 -i test.aac \
+//               -c copy -map 0:v -map 1:a ff_av.ts
 // =============================================================================
 #include <mpegmech/demuxer.hpp>
 #include <mpegmech/es_splitter.hpp>
 #include <mpegmech/muxer.hpp>
 
 #include <cstdio>
+#include <cstdlib>
 #include <random>
+#include <string>
 #include <vector>
 
 using namespace mpegmech;
@@ -29,10 +32,35 @@ namespace {
 int g_fail = 0;
 #define EXPECT(c, m) do { if (!(c)) { std::printf("  [FAIL] %s (line %d)\n", (m), __LINE__); ++g_fail; } } while (0)
 
-std::vector<std::uint8_t> read_file(const char* p)
+/// 素材目录：优先 `MPEGMECH_TEST_DATA` 环境变量，其次 /tmp、当前目录。
+/// 这样同一份测试在 Linux（/tmp）和 Windows（拷到某个目录再设环境变量）都能跑。
+std::string g_data_dir = ".";
+
+std::string find_fixture(const char* name)
+{
+    std::vector<std::string> dirs;
+    if (const char* d = std::getenv("MPEGMECH_TEST_DATA")) { dirs.emplace_back(d); }
+    dirs.emplace_back("/tmp");
+    dirs.emplace_back(".");
+
+    for (const auto& d : dirs) {
+        const std::string p = d + "/" + name;
+        if (std::FILE* f = std::fopen(p.c_str(), "rb")) {
+            std::fclose(f);
+            g_data_dir = d;
+            return p;
+        }
+    }
+    return {};
+}
+
+std::vector<std::uint8_t> read_file(const char* name)
 {
     std::vector<std::uint8_t> out;
-    std::FILE* f = std::fopen(p, "rb");
+    const std::string         p = find_fixture(name);
+    if (p.empty()) { return out; }
+
+    std::FILE* f = std::fopen(p.c_str(), "rb");
     if (!f) { return out; }
     std::uint8_t b[65536];
     std::size_t  n;
@@ -41,6 +69,13 @@ std::vector<std::uint8_t> read_file(const char* p)
     }
     std::fclose(f);
     return out;
+}
+
+/// 产物写到素材同目录（供 ffmpeg 交叉验证）。
+std::FILE* create_out(const char* name)
+{
+    const std::string p = g_data_dir + "/" + name;
+    return std::fopen(p.c_str(), "wb");
 }
 
 /// 一帧 ES（录制下来的，用于比对）
@@ -233,7 +268,7 @@ int main()
 
     // ---- 1. H264 ----
     {
-        const auto raw = read_file("/tmp/test_h264_aud.h264");
+        const auto raw = read_file("test_h264_aud.h264");
         if (raw.empty()) {
             std::printf("跳过 H264（缺 /tmp/test_h264_aud.h264）\n");
         } else {
@@ -252,7 +287,7 @@ int main()
 
     // ---- 2. H265 ----
     {
-        const auto raw = read_file("/tmp/test_nob.h265");
+        const auto raw = read_file("test_nob.h265");
         if (raw.empty()) {
             std::printf("跳过 H265（缺 /tmp/test_nob.h265）\n");
         } else {
@@ -265,17 +300,18 @@ int main()
 
     // ---- 3. 音视频混合 ----
     {
-        const auto v = read_file("/tmp/test_h264_aud.h264");
-        const auto a = read_file("/tmp/test.aac");
+        const auto v = read_file("test_h264_aud.h264");
+        const auto a = read_file("test.aac");
         if (v.empty() || a.empty()) {
             std::printf("跳过 AV（缺素材）\n");
         } else {
             const auto m = mux_to_ts(v, Codec::h264, a);
             std::printf("AV → TS: %zu 字节（%zu 包）\n", m.ts.size(), m.ts.size() / 188);
-            if (std::FILE* f = std::fopen("/tmp/out_av.ts", "wb")) {
+            if (std::FILE* f = create_out("out_av.ts")) {
                 std::fwrite(m.ts.data(), 1, m.ts.size(), f);
                 std::fclose(f);
-                std::printf("  已写 /tmp/out_av.ts（供 ffmpeg 交叉验证）\n");
+                std::printf("  已写 %s/out_av.ts（供 ffmpeg 交叉验证）\n",
+                            g_data_dir.c_str());
             }
 
             // 音视频交错到达，顺序不可能与送进去的一致，所以按 stream 分组比。
@@ -323,7 +359,7 @@ int main()
 
     // ---- 4. 从流中间接入 ----
     {
-        const auto raw = read_file("/tmp/test_h264_aud.h264");
+        const auto raw = read_file("test_h264_aud.h264");
         if (!raw.empty()) {
             auto m = mux_to_ts(raw, Codec::h264);
             // 丢掉前 1200 字节（超过 6 个 TS 包），模拟从中间开始收
@@ -348,7 +384,7 @@ int main()
     //  自己封自己解容易"自洽地错"。这一段用的是 ffmpeg 打的 TS：PID 分配、
     //  PMT 描述符、PCR 位置都跟我们不一样，能过才算真的能读别人的流。
     {
-        const auto ff = read_file("/tmp/ff_av.ts");
+        const auto ff = read_file("ff_av.ts");
         if (ff.empty()) {
             std::printf("跳过第三方 TS（缺 /tmp/ff_av.ts）\n");
         } else {

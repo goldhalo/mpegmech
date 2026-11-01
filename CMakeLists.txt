@@ -28,6 +28,13 @@ if(NOT CMAKE_CONFIGURATION_TYPES AND NOT CMAKE_BUILD_TYPE)
     set(CMAKE_BUILD_TYPE Release CACHE STRING "Build type" FORCE)
 endif()
 
+# 源码是 UTF-8（含中文注释）。cl 默认按系统代码页（GBK）读源码，
+# UTF-8 里某些汉字的末字节正好是 0x5C（反斜杠），会被当成续行符把下一行吞掉，
+# 报出一堆莫名其妙的语法错误。全局加 /utf-8，库和测试都受益。
+if(MSVC)
+    add_compile_options(/utf-8)
+endif()
+
 set(MPEGMECH_OUTPUT_DIR "${CMAKE_BINARY_DIR}/bin")
 set(CMAKE_RUNTIME_OUTPUT_DIRECTORY         "${MPEGMECH_OUTPUT_DIR}")
 set(CMAKE_RUNTIME_OUTPUT_DIRECTORY_DEBUG   "${MPEGMECH_OUTPUT_DIR}")

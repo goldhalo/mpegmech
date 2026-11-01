@@ -106,7 +106,7 @@ void build_system_header(Bytes& out, std::uint32_t mux_rate,
 
     for (const auto& s : streams) {
         out.push_back(s.stream_id);
-        out.push_back(0xC0 | (s.bs_buffer_bound >> 8));
+        out.push_back(static_cast<std::uint8_t>(0xC0 | (s.bs_buffer_bound >> 8)));
         out.push_back(static_cast<std::uint8_t>(s.bs_buffer_bound & 0xFF));
     }
 

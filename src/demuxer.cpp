@@ -114,7 +114,7 @@ bool looks_key(Codec codec, const std::uint8_t* p, std::size_t len) noexcept
 //  Impl
 // =============================================================================
 
-class Demuxer::Impl {
+struct Demuxer::Impl {
 public:
     Impl(const DemuxerConfig& c, FrameCallback f, StreamCallback s)
         : cfg(c), on_frame(std::move(f)), on_stream(std::move(s)) {}
