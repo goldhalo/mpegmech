@@ -254,7 +254,7 @@ public:
                     StreamInfo si;
                     si.stream_id = it->second;
                     si.codec     = c;
-                    si.program   = 1;
+                    si.program   = e.program;
                     si.pid       = e.pid;
                     on_stream(si);
                 }
@@ -270,7 +270,7 @@ public:
             StreamInfo si;
             si.stream_id = id;
             si.codec     = codecs[id];
-            si.program   = 1;
+            si.program   = e.program;
             si.pid       = e.pid;
             si.adts      = true;    // TS 里的 AAC 恒带 ADTS 头
             on_stream(si);
@@ -279,7 +279,8 @@ public:
     }
 
     /// 发出一个 TS 帧（统一填 FrameInfo、计统计）。
-    void push_ts_frame(int id, Codec codec, std::int64_t pts, std::int64_t dts,
+    void push_ts_frame(int id, Codec codec, std::uint16_t program,
+                       std::int64_t pts, std::int64_t dts,
                        const std::uint8_t* p, std::size_t n)
     {
         if (n == 0) { return; }
@@ -288,8 +289,8 @@ public:
         fi.stream_id = id;
         fi.codec     = codec;
         fi.pts       = pts;
-        fi.dts      = dts;
-        fi.program   = 1;
+        fi.dts       = dts;
+        fi.program   = program;
         if (isAudio(codec)) {
             fi.flags = fi.flags | FrameFlag::key;      // 音频帧恒可作为起点
         } else if (looks_key(codec, p, n)) {
@@ -348,14 +349,14 @@ public:
                                    : 0;
                     }
                     if (flen > cfg.max_frame_bytes) { ++ts_frame_errors; }
-                    else { push_ts_frame(id, codec, pts, pts, h, flen); }
+                    else { push_ts_frame(id, codec, f.program, pts, pts, h, flen); }
 
                     if (pts != kNoTimestamp && step > 0) { pts += step; }
                     i += flen;
                 }
                 if (i == 0) {   // 不是 ADTS：原样透传，别把数据吞掉
                     if (total > cfg.max_frame_bytes) { ++ts_frame_errors; }
-                    else { push_ts_frame(id, codec, f.pts, f.dts,
+                    else { push_ts_frame(id, codec, f.program, f.pts, f.dts,
                                          f.payload.data(), total); }
                 }
                 continue;
@@ -365,7 +366,8 @@ public:
                 ++ts_frame_errors;
                 continue;
             }
-            push_ts_frame(id, codec, f.pts, f.dts, f.payload.data(), f.payload.size());
+            push_ts_frame(id, codec, f.program, f.pts, f.dts,
+                         f.payload.data(), f.payload.size());
         }
 
         stats.bytes_skipped = ts.bytes_skipped();

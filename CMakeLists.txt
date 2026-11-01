@@ -120,6 +120,9 @@ if(MPEGMECH_BUILD_TESTS)
         get_filename_component(test_name ${test_src} NAME_WE)
         add_executable(${test_name} ${test_src})
         target_link_libraries(${test_name} PRIVATE mpegmech)
+        # 少数测试要手工拼容器（构造异常/多节目流），用得到 src 里的内部头
+        target_include_directories(${test_name} PRIVATE
+            "${CMAKE_CURRENT_SOURCE_DIR}/src")
         add_test(NAME ${test_name} COMMAND ${test_name})
     endforeach()
 

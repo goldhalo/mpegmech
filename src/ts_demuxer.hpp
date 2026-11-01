@@ -33,6 +33,7 @@ enum class TsSyncState {
 struct TsEsInfo {
     std::uint8_t  stream_type = 0;
     std::uint16_t pid         = 0;
+    std::uint16_t program     = 0;   ///< 所属 program_number（多节目流时区分用）
 };
 
 /// TS 解复用的核心状态机。
@@ -42,6 +43,7 @@ public:
     struct Frame {
         std::uint8_t              stream_type = 0;
         std::uint16_t             pid         = 0;
+        std::uint16_t             program     = 0;
         std::int64_t              pts         = kNoTimestamp;
         std::int64_t              dts         = kNoTimestamp;
         std::vector<std::uint8_t> payload;    ///< PES 里的 ES 数据
@@ -75,15 +77,17 @@ private:
                    bool pusi, std::vector<Frame>& out);
     void emit_pes(std::uint16_t pid, std::vector<Frame>& out);
 
+    [[nodiscard]] const TsEsInfo* find_es(std::uint16_t pid) const noexcept;
+
     TsSyncState m_state = TsSyncState::searching;
 
     std::vector<std::uint8_t> m_buf;      ///< 未处理的字节
     std::size_t               m_scan = 0; ///< 扫描位置
 
     // PSI
-    std::uint16_t m_pmt_pid = 0;
-    bool          m_have_pat = false;
-    std::vector<TsEsInfo> m_streams;
+    /// PMT PID → program_number（一个 TS 可以有多套节目）。
+    std::map<std::uint16_t, std::uint16_t> m_programs;
+    std::vector<TsEsInfo>                  m_streams;
 
     // 每个 PID 的 PES 累积
     struct PesAccum {

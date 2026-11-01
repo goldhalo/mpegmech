@@ -80,8 +80,8 @@ void TsDemuxer::feed(const std::uint8_t* data, std::size_t len,
                 const std::uint8_t* q = m_buf.data() + m_scan;
                 if (q[0] == 0x47 && q[kTsPacketSize] == 0x47 &&
                     q[kTsPacketSize * 2] == 0x47) {
-                    m_state = (m_have_pat ? TsSyncState::ready
-                                          : TsSyncState::waiting_psi);
+                    m_state = (m_programs.empty() ? TsSyncState::waiting_psi
+                                                  : TsSyncState::ready);
                     break;
                 }
                 ++m_scan;
@@ -129,7 +129,7 @@ void TsDemuxer::parse_packet(const std::uint8_t* pkt, std::vector<Frame>& out)
 
     // 没有 payload（afc == 0x02）
     if (afc == 0x02) {
-        if (pid == 0x0000 || pid == m_pmt_pid) { ++m_bad; }
+        if (pid == 0x0000 || m_programs.find(pid) != m_programs.end()) { ++m_bad; }
         return;
     }
 
@@ -143,27 +143,31 @@ void TsDemuxer::parse_packet(const std::uint8_t* pkt, std::vector<Frame>& out)
         return;
     }
 
-    // ---- PMT ----
-    if (m_pmt_pid != 0 && pid == m_pmt_pid) {
-        parse_psi(payload, plen, 1);
+    // ---- PMT（多节目时每个节目一个 PMT PID）----
+    if (m_programs.find(pid) != m_programs.end()) {
+        parse_psi(payload, plen, pid);
         return;
     }
 
     // ---- 其它 PID：还不在流表里就跳过 ----
-    bool known = false;
-    for (const auto& e : m_streams) {
-        if (e.pid == pid) { known = true; break; }
-    }
-    if (!known) { return; }
+    if (find_es(pid) == nullptr) { return; }
 
     parse_pes(pid, payload, plen, pusi, out);
+}
+
+const TsEsInfo* TsDemuxer::find_es(std::uint16_t pid) const noexcept
+{
+    for (const auto& e : m_streams) {
+        if (e.pid == pid) { return &e; }
+    }
+    return nullptr;
 }
 
 // =============================================================================
 //  PSI（PAT / PMT）
 // =============================================================================
 
-void TsDemuxer::parse_psi(const std::uint8_t* payload, std::size_t len, std::uint16_t which)
+void TsDemuxer::parse_psi(const std::uint8_t* payload, std::size_t len, std::uint16_t pid)
 {
     if (len < 1) { return; }
     const std::size_t pointer = payload[0];
@@ -176,51 +180,72 @@ void TsDemuxer::parse_psi(const std::uint8_t* payload, std::size_t len, std::uin
     if (off + 3 + sec_len > len) { return; }
 
     const std::uint8_t* sec = payload + off;
+    const std::size_t   end = 3 + sec_len - 4;      // 去掉 CRC32
 
-    if (which == 0 && table_id == 0x00) {
-        // PAT：跳过 8 字节头（table_id..last_section_number），然后每个节目 4 字节
-        std::size_t p = 8;
-        const std::size_t end = 3 + sec_len - 4;   // 去掉 CRC
-        while (p + 4 <= end) {
+    if (pid == 0x0000) {
+        if (table_id != 0x00) { return; }
+        // PAT：8 字节头（table_id / len / tsid / version / sec_num / last_sec），
+        // 之后每个节目 4 字节：program_number(2) + PMT_PID(2)。
+        //
+        // 一次 PAT 就是当前完整节目表，所以整张重建 —— 多节目流里不同节目的
+        // PMT 各占一个 PID，早先只记最后一个，等于只解最后一套节目。
+        std::map<std::uint16_t, std::uint16_t> progs;
+        for (std::size_t p = 8; p + 4 <= end; p += 4) {
             const std::uint16_t prog = get16(sec + p);
             const std::uint16_t pmt  = static_cast<std::uint16_t>(
                 ((sec[p + 2] & 0x1F) << 8) | sec[p + 3]);
-            if (prog != 0) {
-                m_pmt_pid = pmt;
-                m_have_pat = true;
-            }
-            p += 4;
+            if (prog != 0) { progs[pmt] = prog; }
         }
-        if (m_have_pat && m_state == TsSyncState::waiting_psi) {
-            m_state = TsSyncState::ready;
-        }
-    } else if (which == 1 && table_id == 0x02) {
-        // PMT 头部固定 12 字节：
-        //   [0]table_id [1..2]section_length [3..4]program_number [5]version
-        //   [6]section_number [7]last_section_number [8..9]PCR_PID
-        //   [10..11]program_info_length
-        // ★ program_info_length 在偏移 10，不是 12 —— 早先从 12 读，直接跳过了
-        //   整条 PMT 的 ES 循环，导致"同步上了但认不出流"。
-        const std::size_t end = 3 + sec_len - 4;        // 去掉 CRC32
-        std::size_t       p   = 10;
-        if (p + 2 > end) { return; }
-        const std::size_t prog_info_len = static_cast<std::size_t>(
-            ((sec[p] & 0x0F) << 8) | sec[p + 1]);
-        p += 2 + prog_info_len;
+        if (progs.empty()) { return; }
 
-        m_streams.clear();
-        while (p + 5 <= end) {
-            const std::uint8_t  st  = sec[p];
-            const std::uint16_t ep  = static_cast<std::uint16_t>(
-                ((sec[p + 1] & 0x1F) << 8) | sec[p + 2]);
-            const std::size_t   ilen = static_cast<std::size_t>(
-                ((sec[p + 3] & 0x0F) << 8) | sec[p + 4]);
-            m_streams.push_back({st, ep});
-            p += 5 + ilen;
+        // 已经不存在的节目，它的流表项要清掉，否则会继续解到死掉的 PID
+        for (auto it = m_streams.begin(); it != m_streams.end();) {
+            bool alive = false;
+            for (const auto& kv : progs) {
+                if (kv.second == it->program) { alive = true; break; }
+            }
+            it = alive ? it + 1 : m_streams.erase(it);
         }
-        if (!m_streams.empty() && m_state != TsSyncState::ready) {
-            m_state = TsSyncState::ready;
-        }
+        m_programs.swap(progs);
+        if (m_state == TsSyncState::waiting_psi) { m_state = TsSyncState::ready; }
+        return;
+    }
+
+    // PMT：头部固定 12 字节
+    //   [0]table_id [1..2]section_length [3..4]program_number [5]version
+    //   [6]section_number [7]last_section_number [8..9]PCR_PID
+    //   [10..11]program_info_length
+    // ★ program_info_length 在偏移 10，不是 12 —— 早先从 12 读，直接跳过了
+    //   整条 PMT 的 ES 循环，导致"同步上了但认不出流"。
+    if (table_id != 0x02) { return; }
+
+    const std::uint16_t program = m_programs[pid];
+
+    std::size_t p = 10;
+    if (p + 2 > end) { return; }
+    const std::size_t prog_info_len = static_cast<std::size_t>(
+        ((sec[p] & 0x0F) << 8) | sec[p + 1]);
+    p += 2 + prog_info_len;
+
+    // 只替换本节目下的流，别的节目不动
+    m_streams.erase(std::remove_if(m_streams.begin(), m_streams.end(),
+                                   [program](const TsEsInfo& e) {
+                                       return e.program == program;
+                                   }),
+                    m_streams.end());
+
+    while (p + 5 <= end) {
+        const std::uint8_t  st  = sec[p];
+        const std::uint16_t ep  = static_cast<std::uint16_t>(
+            ((sec[p + 1] & 0x1F) << 8) | sec[p + 2]);
+        const std::size_t   ilen = static_cast<std::size_t>(
+            ((sec[p + 3] & 0x0F) << 8) | sec[p + 4]);
+        m_streams.push_back({st, ep, program});
+        p += 5 + ilen;
+    }
+
+    if (m_state != TsSyncState::ready && !m_streams.empty()) {
+        m_state = TsSyncState::ready;
     }
 }
 
@@ -317,8 +342,9 @@ void TsDemuxer::emit_pes(std::uint16_t pid, std::vector<Frame>& out)
     f.pid  = pid;
     f.pts  = pts;
     f.dts  = (dts == kNoTimestamp) ? pts : dts;
-    for (const auto& e : m_streams) {
-        if (e.pid == pid) { f.stream_type = e.stream_type; break; }
+    if (const TsEsInfo* es = find_es(pid)) {
+        f.stream_type = es->stream_type;
+        f.program     = es->program;
     }
     f.payload.assign(acc.data.begin() + static_cast<std::ptrdiff_t>(9 + hdr_len),
                      acc.data.begin() + static_cast<std::ptrdiff_t>(avail));
@@ -350,8 +376,7 @@ void TsDemuxer::reset()
     m_state = TsSyncState::searching;
     m_buf.clear();
     m_scan = 0;
-    m_pmt_pid = 0;
-    m_have_pat = false;
+    m_programs.clear();
     m_streams.clear();
     m_pes.clear();
     m_skipped = 0;

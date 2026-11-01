@@ -1,33 +1,30 @@
-fix: PSM 的 elementary_stream_map_length 写成了条数，应该是字节数
+feat: TS 多节目（每套节目各一个 PMT，按 program_number 分流）
 
-加 G.711 支持时才发现这个字段一直是错的 —— 之前两轮测试都没暴露。
+README 一直写着"多节目读取"，实现上其实只记了 PAT 里**最后一个** PMT PID，
+多节目流等于只解最后一套，FrameInfo.program 还恒填 1。现在补上。
 
-  PSM 结构
-    [current_next+version 2B][program_stream_info_length 2B][info]
-    [elementary_stream_map_length 2B][每条 4B: stream_type + sid + info_len]
-    [CRC32 4B]
+  TsDemuxer
+    - m_pmt_pid + m_have_pat  →  m_programs（PMT PID → program_number 的整张表）
+    - PAT 整张重建（一次 PAT 就是当前完整节目表），已消失的节目连带清流表
+    - PMT 只替换**本节目**下的流表项，别的节目不动
+    - TsEsInfo / Frame 加 program 字段
 
-  elementary_stream_map_length 是**映射区的字节数**（每条 4 字节），
-  我按"流的条数"写（1 条 → 0x0001）。解封装侧判断 `remaining >= 4`，
-  1 永远不成立，整张 PSM 被当成空表跳过。
+  Demuxer
+    - StreamInfo.program / FrameInfo.program 用真实 program_number（PS 仍恒为 1）
+    - push_ts_frame 多带一个 program 参数
 
-为什么两轮测试都没炸：
-  视频靠 stream_id 0xE0 就能猜出 H.264，AAC 靠 ADTS 同步字也猜得出，
-  所以 ffprobe 一直报 h264 + aac —— 看起来是对的。
-  只有 G.711 这种**只能靠 PSM 认**的流才会露馅：codec 解出来是 unknown。
+test_ts_multiprogram.cpp
+  手工拼一个双节目 TS（我们自己的复用器只做单节目）：
 
-教训：验证一张表，要用"只能靠这张表才能得到"的用例。
-用"猜也猜得对"的流去测，等于没测。
+    PAT ─┬─> program 1 → PMT@0x1000 → ES 0x100 (H.264)
+         └─> program 2 → PMT@0x1001 → ES 0x200 (AAC)
 
-test_g711_ps.cpp
-  - 造 8 kHz / 20 ms 的 G.711 裸流（锯齿波，错位能看出来）
-  - PS 封装 → 37 字节不对齐地喂回去 → 帧数、codec、码流、PTS 间隔全比
-  - A-law / μ-law 各跑一遍
+  两路 ES 交错写、中途重发一次 PSI，用 97 字节不对齐地喂。
+  结果：2 条流、program 分别 1 / 2、码流逐字节一致、resync=0 err=0。
 
-交叉验证：
-  G.711A → ffprobe 认成 pcm_alaw / 8000 Hz / 单声道，ffmpeg 解码零错误
-  G.711U → ffprobe 认成 mp2。这是 ffmpeg 的 PS 侧没做 0x91 映射，
-           与码流无关（本库自己两种都能认回来）。对端是 ffmpeg 时用 A-law。
-  改完复验 AV PS：仍为 h264 + aac，解码零错误。
+  顺带把"PAT/PMT 的字段在哪个偏移"钉死在测试里 —— 上一轮那个
+  program_info_length 偏移写错（10 当成 12）就是这么漏掉的：
+  单节目流只要有一次对上了就看不出来。
 
-设计文档 §6.2 记了这个坑和 G.711 的放法。
+CMake：测试目标加上 src 作为 include 目录（手工拼容器要用内部头）。
+MSVC 侧 12 个用例零告警。
