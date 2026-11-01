@@ -33,6 +33,9 @@ endif()
 # 报出一堆莫名其妙的语法错误。全局加 /utf-8，库和测试都受益。
 if(MSVC)
     add_compile_options(/utf-8)
+    # fopen / getenv 在 MSVC 上默认触发 C4996（建议换 fopen_s / _dupenv_s）。
+    # 测试与示例大量用到，换掉只会让代码更啰嗦，跨平台也更麻烦。
+    add_compile_definitions(_CRT_SECURE_NO_WARNINGS)
 endif()
 
 set(MPEGMECH_OUTPUT_DIR "${CMAKE_BINARY_DIR}/bin")
@@ -87,6 +90,20 @@ else()
     if(MPEGMECH_WARNINGS_AS_ERRORS)
         target_compile_options(mpegmech PRIVATE -Werror)
     endif()
+endif()
+
+# ---------------------------------------------------------------------------
+# 2.5 示例 / 工具
+# ---------------------------------------------------------------------------
+if(MPEGMECH_BUILD_EXAMPLES)
+    file(GLOB MPEGMECH_EXAMPLE_SOURCES CONFIGURE_DEPENDS
+         "${CMAKE_CURRENT_SOURCE_DIR}/example/*.cpp")
+
+    foreach(ex_src ${MPEGMECH_EXAMPLE_SOURCES})
+        get_filename_component(ex_name ${ex_src} NAME_WE)
+        add_executable(${ex_name} ${ex_src})
+        target_link_libraries(${ex_name} PRIVATE mpegmech)
+    endforeach()
 endif()
 
 # ---------------------------------------------------------------------------

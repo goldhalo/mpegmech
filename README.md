@@ -110,12 +110,40 @@ mx->flush();
 ## 构建
 
 ```bash
-cmake -S . -B build -G "Visual Studio 16 2019" -A x64
+cmake -S . -B build
 cmake --build build --config Release
-./build/bin/mpegmech_ut
+
+# 测试（每个 *.cpp 是独立的可执行文件，也可以直接跑 ctest）
+ctest --test-dir build --output-on-failure
+
+# 示例 / 工具
+cmake -S . -B build -DMPEGMECH_BUILD_EXAMPLES=ON
 ```
 
 交叉编译（aarch64）见 `CMakeLists.txt` 头部注释。
+
+### 测试素材
+
+往返测试与切分不变性测试需要几个裸流素材，按
+`$MPEGMECH_TEST_DATA` → `/tmp` → 当前目录的顺序查找，**缺失时对应小节自动跳过**
+（不会伪装成通过，输出里会写"跳过"）：
+
+| 文件 | 内容 |
+|---|---|
+| `test_h264_aud.h264` | 带 AUD 的 H.264 裸流 |
+| `test_nob.h265` | H.265 裸流 |
+| `test.aac` | ADTS 封装的 AAC |
+| `ff_av.ts` | ffmpeg 打的 TS（验证"能读别人的流"）：`ffmpeg -y -i test_h264_aud.h264 -i test.aac -c copy -map 0:v -map 1:a ff_av.ts` |
+
+### 稳定性
+
+```bash
+mpegmech_soak --seconds 600 --mode both      # reuse：一个 Demuxer 反复喂 + reset
+                                             # churn：每轮 create/destroy
+```
+
+每 10 秒打一行 RSS。**看曲线形状，不看斜率**：启动期爬升后走平属正常，
+持续线性上涨才是泄漏。
 
 ---
 
