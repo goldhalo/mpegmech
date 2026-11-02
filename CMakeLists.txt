@@ -58,6 +58,15 @@ option(MPEGMECH_BUILD_TESTS      "构建单元测试" ON)
 option(MPEGMECH_BUILD_EXAMPLES   "构建示例程序" OFF)
 option(MPEGMECH_WARNINGS_AS_ERRORS "把编译告警当错误（CI 用）" OFF)
 
+# 位置无关代码。
+#
+# 本库只出静态库，但静态库常常被链进 .so。缺 -fPIC 时，编静态库、跑单测都
+# 正常，**只在最终链 .so 那一步**报：
+#     relocation R_X86_64_PC32 against symbol `...' can not be used when
+#     making a shared object; recompile with -fPIC
+# 纯静态场景可 -DMPEGMECH_PIC=OFF。
+option(MPEGMECH_PIC "编译为位置无关代码（静态库要链进 .so 时必须开）" ON)
+
 # ---------------------------------------------------------------------------
 # 2. 库目标
 # ---------------------------------------------------------------------------
@@ -67,6 +76,9 @@ file(GLOB_RECURSE MPEGMECH_HEADERS CONFIGURE_DEPENDS
      "${CMAKE_CURRENT_SOURCE_DIR}/include/mpegmech/*.hpp")
 
 add_library(mpegmech ${MPEGMECH_SOURCES} ${MPEGMECH_HEADERS})
+
+set_target_properties(mpegmech PROPERTIES
+    POSITION_INDEPENDENT_CODE ${MPEGMECH_PIC})
 
 target_include_directories(mpegmech
     PUBLIC
