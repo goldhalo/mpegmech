@@ -147,6 +147,26 @@ mpegmech_soak --seconds 600 --mode both      # reuse：一个 Demuxer 反复喂 
 
 ---
 
+## 在其他项目里使用（find_package）
+
+```bash
+cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+cmake --build build -j$(nproc)
+cmake --install build                  # 默认前缀：Linux /usr/local
+```
+
+然后：
+
+```cmake
+find_package(mpegmech REQUIRED)
+target_link_libraries(app PRIVATE mpegmech::mpegmech)
+```
+
+本库无外部依赖，装出去就是 `include/mpegmech/*.hpp` + `lib/libmpegmech.a` +
+`lib/cmake/mpegmech/`，一条 `target_link_libraries` 就够，不用写 `-I/-L/-l`。
+
+---
+
 ## 文档
 
 - **概要设计**：[`doc/概要设计-20261031.md`](doc/概要设计-20261031.md)

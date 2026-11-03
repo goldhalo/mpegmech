@@ -1,0 +1,15 @@
+@PACKAGE_INIT@
+
+# -----------------------------------------------------------------------------
+#  mpegmechConfig.cmake —— find_package(mpegmech) 的入口
+# -----------------------------------------------------------------------------
+#  用法：
+#      find_package(mpegmech REQUIRED)
+#      target_link_libraries(app PRIVATE mpegmech::mpegmech)
+#
+#  本包无外部依赖（只用 C++17 标准库），所以这里只 include targets 文件。
+# -----------------------------------------------------------------------------
+
+include("${CMAKE_CURRENT_LIST_DIR}/mpegmechTargets.cmake")
+
+check_required_components(mpegmech)

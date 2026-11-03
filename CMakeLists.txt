@@ -146,11 +146,22 @@ if(MPEGMECH_BUILD_TESTS)
 endif()
 
 # ---------------------------------------------------------------------------
-# 4. 安装
+# 4. 安装与导出
+# ---------------------------------------------------------------------------
+#  装完之后使用者只需要：
+#      find_package(mpegmech REQUIRED)
+#      target_link_libraries(app PRIVATE mpegmech::mpegmech)
+#  链接几个库、要哪些 include 目录，都由导出的 target 带着走，
+#  不用手写 -I/-L/-l 列表。
+#
+#  默认前缀：Linux -> /usr/local，Windows -> C:/Program Files/mpegmech
+#  （要换就 -DCMAKE_INSTALL_PREFIX=...）
 # ---------------------------------------------------------------------------
 include(GNUInstallDirs)
+include(CMakePackageConfigHelpers)
 
 install(TARGETS mpegmech
+        EXPORT mpegmechTargets
         ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR}
         LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}
         RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
@@ -158,3 +169,28 @@ install(TARGETS mpegmech
 install(DIRECTORY include/mpegmech
         DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}
         FILES_MATCHING PATTERN "*.hpp")
+
+# 导出 targets：生成 <prefix>/lib/cmake/mpegmech/mpegmechTargets.cmake
+install(EXPORT mpegmechTargets
+        FILE mpegmechTargets.cmake
+        NAMESPACE mpegmech::
+        DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/mpegmech)
+
+# Config + ConfigVersion：find_package(mpegmech) 找的就是这两个
+configure_package_config_file(cmake/mpegmechConfig.cmake.in
+        "${CMAKE_CURRENT_BINARY_DIR}/mpegmechConfig.cmake"
+        INSTALL_DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/mpegmech)
+
+# 0.x 阶段用 SameMinorVersion：0.1 与 0.2 不算兼容（1.0 之后可改 SameMajorVersion）
+write_basic_package_version_file(
+        "${CMAKE_CURRENT_BINARY_DIR}/mpegmechConfigVersion.cmake"
+        VERSION ${PROJECT_VERSION}
+        COMPATIBILITY SameMinorVersion)
+
+install(FILES
+        "${CMAKE_CURRENT_BINARY_DIR}/mpegmechConfig.cmake"
+        "${CMAKE_CURRENT_BINARY_DIR}/mpegmechConfigVersion.cmake"
+        DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/mpegmech)
+
+install(FILES LICENSE NOTICE
+        DESTINATION ${CMAKE_INSTALL_DATADIR}/doc/mpegmech)
