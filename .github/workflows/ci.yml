@@ -1,0 +1,182 @@
+name: CI
+
+on:
+  push:
+    branches: [ main, master, develop ]
+  pull_request:
+    branches: [ main, master, develop ]
+  workflow_dispatch:
+
+# 本仓不依赖 netmech，checkout 即可。
+
+jobs:
+  # ---------------------------------------------------------------------------
+  # Linux / GCC + Clang
+  # ---------------------------------------------------------------------------
+  linux:
+    name: Linux / ${{ matrix.compiler }} / ${{ matrix.build_type }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        compiler: [gcc, clang]
+        build_type: [Debug, Release]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 安装工具
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y cmake ninja-build
+          if [ "${{ matrix.compiler }}" = "gcc" ]; then
+            sudo apt-get install -y g++
+          else
+            # 用 runner 预装的 clang：apt 装 clang++ 常因版本被钉死而失败
+            clang++ --version || { echo "::error::runner 上没有预装 clang++"; exit 1; }
+          fi
+
+      - name: 配置
+        run: |
+          if [ "${{ matrix.compiler }}" = "gcc" ]; then
+            export CC=gcc CXX=g++
+          else
+            export CC=clang CXX=clang++
+          fi
+          cmake -S . -B build -G Ninja \
+                -DCMAKE_BUILD_TYPE=${{ matrix.build_type }} \
+                -DMPEGMECH_WARNINGS_AS_ERRORS=ON
+
+      - name: 构建
+        run: cmake --build build --parallel
+
+      - name: 测试
+        run: ctest --test-dir build --output-on-failure
+
+      # 本仓每个 test/*.cpp 都是独立可执行（12 个），没有统一的 *_ut，
+      # 所以失败时用 ctest -V 打详细输出。
+      - name: 直接运行测试（失败时取详细输出）
+        if: failure()
+        run: ctest --test-dir build --output-on-failure -V || true
+
+  # ---------------------------------------------------------------------------
+  # Windows / MSVC
+  #
+  # 生成器用 Ninja 而不用 Visual Studio 生成器：后者的探测在 runner 镜像升级后
+  # 容易失效（报 "could not find any instance of Visual Studio" 或
+  # "Failed to run MSBuild command"）。msvc-dev-cmd 摆好 cl 的环境再走 Ninja 更稳。
+  #
+  # 这里**不开** /WX：本仓依赖的第三方 / 平台头文件在 /W4 下的告警不由我们控制，
+  # 让 "能不能编过" 成为这个 job 的判据。告警当错误只在 Linux 上做。
+  # ---------------------------------------------------------------------------
+  windows:
+    name: Windows / MSVC / ${{ matrix.build_type }}
+    runs-on: windows-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        build_type: [Debug, Release]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 配置 MSVC 环境
+        uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: x64
+
+      - name: 配置
+        shell: pwsh
+        run: |
+          $out  = cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=${{ matrix.build_type }} 2>&1 | Out-String
+          $code = $LASTEXITCODE
+          Write-Host $out
+          if ($code -ne 0) {
+            $lines = $out -split "`r?`n"
+            $idx = -1
+            for ($i = 0; $i -lt $lines.Count; $i++) {
+              if ($lines[$i] -match 'CMake Error') { $idx = $i; break }
+            }
+            if ($idx -ge 0) {
+              $end  = [Math]::Min($idx + 7, $lines.Count - 1)
+              $errs = ($lines[$idx..$end] | Where-Object { $_.Trim() -ne '' }) -join ' | '
+            } else {
+              $errs = (($lines | Where-Object { $_.Trim() -ne '' }) | Select-Object -Last 8) -join ' | '
+            }
+            Write-Host "::error title=Windows configure failed::$errs"
+            exit 1
+          }
+
+      - name: 构建
+        shell: pwsh
+        run: |
+          $out  = cmake --build build --parallel 2>&1 | Out-String
+          $code = $LASTEXITCODE
+          Write-Host $out
+          if ($code -ne 0) {
+            $line = ($out -split "`r?`n" | Where-Object { $_ -match 'error C|: fatal|error MSB' } | Select-Object -First 2) -join ' | '
+            Write-Host "::error title=Windows build failed::$line"
+            exit 1
+          }
+
+      - name: 测试
+        shell: pwsh
+        run: |
+          $out  = ctest --test-dir build --output-on-failure 2>&1 | Out-String
+          $code = $LASTEXITCODE
+          Write-Host $out
+          if ($code -ne 0) { Write-Host "::error title=Windows 单测失败"; exit 1 }
+
+  # ---------------------------------------------------------------------------
+  # 质量门禁
+  # ---------------------------------------------------------------------------
+  quality:
+    name: 质量检查
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 检查禁止的 C++20 特性
+        run: |
+          FAIL=0
+          # 只看代码，跳过纯注释行
+          for pat in 'co_await' 'co_return' 'co_yield' 'std::span' 'std::format' \
+                     'std::jthread' 'std::atomic_ref' '\bconcept\b' '\branges::' '<=>'; do
+            hits=$(grep -rEn "$pat" include/ src/ example/ test/ \
+                     --include='*.hpp' --include='*.cpp' 2>/dev/null \
+                   | grep -vE '^[^:]+:[0-9]+:[[:space:]]*//' || true)
+            if [ -n "$hits" ]; then
+              echo "❌ 发现禁止的构造: $pat"
+              echo "$hits"
+              FAIL=1
+            fi
+          done
+          if [ $FAIL -eq 1 ]; then exit 1; fi
+          echo "✅ 未发现 C++20 构造"
+
+      - name: 检查不得引入 Boost / OpenSSL
+        run: |
+          # 只看 #include：注释里提到 boost::beast 是在讲"为什么不用它"
+          if grep -rnE '^[[:space:]]*#[[:space:]]*include[[:space:]]*<(boost|openssl)/' \
+               include/ src/ example/ test/ --include='*.hpp' --include='*.cpp'; then
+            echo "❌ 发现有 boost / openssl 的 #include（本库零外部依赖）"
+            exit 1
+          fi
+          echo "✅ 无 Boost / OpenSSL 依赖"
+
+      - name: 检查每个对外头文件可单独包含
+        run: |
+          sudo apt-get update && sudo apt-get install -y g++
+          FAIL=0
+          for h in include/mpegmech/*.hpp; do
+            name=$(basename "$h" .hpp)
+            printf '#include <mpegmech/%s.hpp>\nint main(){return 0;}\n' "$name" > /tmp/one.cpp
+            if ! g++ -std=c++17 -fsyntax-only -Wall -Wextra \
+                 -Iinclude /tmp/one.cpp; then
+              echo "❌ $name.hpp 不能单独包含"
+              FAIL=1
+            fi
+          done
+          if [ $FAIL -eq 1 ]; then exit 1; fi
+          echo "✅ 全部头文件自包含"
