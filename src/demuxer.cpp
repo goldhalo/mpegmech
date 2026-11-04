@@ -461,6 +461,10 @@ public:
     std::error_code parse()
     {
         while (true) {
+            // 防御：任何分支把 scan 推过末尾，`in.size() - scan` 会**无符号下溢**
+            // 成一个天文数字，avail 判据随之失效，循环空转到超时。
+            if (scan > in.size()) { scan = in.size(); break; }
+
             const std::size_t avail = in.size() - scan;
             if (avail < 4) { break; }
 
@@ -478,12 +482,26 @@ public:
             // startcode 长度是 3（00 00 01）或 4（00 00 00 01），
             // 功能码（BA/BB/BC/E0...）紧跟在它**之后**，即 scan + sc。
             const std::size_t code_at = scan + sc;
+
+            // start code 正好顶到缓冲末尾时（avail == sc），功能码还没进来。
+            // 少了这一句，下一行的 in[code_at] 就是越界读：
+            //   · Release / libstdc++ 下读到的"垃圾"有时恰好不是已知功能码，
+            //     被跳过、看不出问题；
+            //   · MSVC Debug 的迭代器检查直接 abort（exit code 3），
+            //     Debug 版 test_g711_ps 之前卡 120 秒超时就是这条链引起。
+            if (code_at >= in.size()) { break; }
+
             const std::uint8_t code = in[code_at];
 
             // ---- PackHeader (0xBA)：14 字节固定 ----
             if (code == 0xBA) {
                 if (state == State::searching) { state = State::synced; }
-                if (avail < sc + 14) { break; }          // 等够
+                // 判据必须和下面的跳转量一致（都是 sc + 15）。
+                // 原先写 sc + 14：avail 恰好等于 sc + 14 时判为"够"，
+                // 但 scan 会落到 in.size() + 1 —— 正好触发上面那个下溢。
+                // （37 字节一块喂数据时很容易撞上，MSVC Debug 的
+                //   test_g711_ps 就是这样挂到 120 秒超时的。）
+                if (avail < sc + 15) { break; }
                 scan = code_at + 15;                     // 跳过整个 pack header
                 continue;
             }
