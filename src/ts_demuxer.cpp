@@ -56,6 +56,7 @@ void TsDemuxer::feed(const std::uint8_t* data, std::size_t len,
             }
             ++m_scan;
             ++m_skipped;
+            ++m_resync_skipped;
         }
         if (!found) {
             // 只保留可能构成同步点的尾巴
@@ -67,7 +68,8 @@ void TsDemuxer::feed(const std::uint8_t* data, std::size_t len,
             }
             return;
         }
-        m_state = TsSyncState::waiting_psi;
+        m_state          = TsSyncState::waiting_psi;
+        m_resync_skipped = 0;   // 重新同步成功：本次失步的账结清
     }
 
     // ---- 按 188 切包 ----
@@ -80,6 +82,7 @@ void TsDemuxer::feed(const std::uint8_t* data, std::size_t len,
             m_state = TsSyncState::searching;
             ++m_scan;
             ++m_skipped;
+            ++m_resync_skipped;
             // 重新触发同步搜索
             while (m_buf.size() - m_scan >= kTsPacketSize * 3) {
                 const std::uint8_t* q = m_buf.data() + m_scan;
@@ -91,8 +94,10 @@ void TsDemuxer::feed(const std::uint8_t* data, std::size_t len,
                 }
                 ++m_scan;
                 ++m_skipped;
+                ++m_resync_skipped;
             }
             if (m_state == TsSyncState::searching) { break; }
+            m_resync_skipped = 0;   // 这次又接上了
             continue;
         }
 
@@ -144,13 +149,13 @@ void TsDemuxer::parse_packet(const std::uint8_t* pkt, std::vector<Frame>& out)
 
     // ---- PAT ----
     if (pid == 0x0000) {
-        parse_psi(payload, plen, 0);
+        parse_psi(payload, plen, 0, pusi);
         return;
     }
 
     // ---- PMT（多节目时每个节目一个 PMT PID）----
     if (m_programs.find(pid) != m_programs.end()) {
-        parse_psi(payload, plen, pid);
+        parse_psi(payload, plen, pid, pusi);
         return;
     }
 
@@ -172,20 +177,16 @@ const TsEsInfo* TsDemuxer::find_es(std::uint16_t pid) const noexcept
 //  PSI（PAT / PMT）
 // =============================================================================
 
-void TsDemuxer::parse_psi(const std::uint8_t* payload, std::size_t len, std::uint16_t pid)
+/// 解析**一条完整**的 PSI section（PAT 或 PMT）。
+///
+/// @param[in] sec   section 起点（table_id 那一个字节）
+/// @param[in] total 含 3 字节头 + section_length 指定的内容（即 3 + sec_len）
+void TsDemuxer::handle_psi_section(const std::uint8_t* sec, std::size_t total,
+                                   std::uint16_t pid)
 {
-    if (len < 1) { return; }
-    const std::size_t pointer = payload[0];
-    std::size_t off = 1 + pointer;
-    if (off + 3 > len) { return; }
-
-    const std::uint8_t table_id = payload[off];
-    const std::size_t  sec_len  = static_cast<std::size_t>(
-        ((payload[off + 1] & 0x0F) << 8) | payload[off + 2]);
-    if (off + 3 + sec_len > len) { return; }
-
-    const std::uint8_t* sec = payload + off;
-    const std::size_t   end = 3 + sec_len - 4;      // 去掉 CRC32
+    if (total < 4) { return; }
+    const std::uint8_t table_id = sec[0];
+    const std::size_t  end      = total - 4;      // 去掉 CRC32
 
     if (pid == 0x0000) {
         if (table_id != 0x00) { return; }
@@ -252,6 +253,73 @@ void TsDemuxer::parse_psi(const std::uint8_t* payload, std::size_t len, std::uin
     if (m_state != TsSyncState::ready && !m_streams.empty()) {
         m_state = TsSyncState::ready;
     }
+}
+
+/// 从累积缓冲里取出所有**完整**的 section 交给 handle_psi_section。
+///
+/// 一段 payload 里可能有多个 section 首尾相接（PAT 短的时候很常见），
+/// 所以是循环而不是"取一个就走" —— 以前只解第一个，后面的直接丢。
+void TsDemuxer::drain_psi_sections(std::uint16_t pid, std::vector<std::uint8_t>& acc)
+{
+    std::size_t off = 0;
+    while (acc.size() - off >= 3) {
+        const std::size_t sec_len = static_cast<std::size_t>(
+            ((acc[off + 1] & 0x0F) << 8) | acc[off + 2]);
+        const std::size_t total = 3 + sec_len;
+
+        if (total > kMaxPsiSection) {          // 畸形长度：放弃这段
+            acc.clear();
+            return;
+        }
+        if (acc.size() - off < total) { break; }   // 还没收全，等下一包
+
+        handle_psi_section(acc.data() + off, total, pid);
+        off += total;
+        // 段之间可能夹 0xFF 填充（ISO 13818-1 §2.4.4）
+        while (off < acc.size() && acc[off] == 0xFF) { ++off; }
+    }
+    if (off > 0) {
+        acc.erase(acc.begin(), acc.begin() + static_cast<std::ptrdiff_t>(off));
+    }
+}
+
+void TsDemuxer::parse_psi(const std::uint8_t* payload, std::size_t len,
+                          std::uint16_t pid, bool pusi)
+{
+    if (len < 1) { return; }
+
+    // ★ PSI section **可以跨 TS 包**（ISO 13818-1 §2.4.4）。
+    //
+    //   以前只在单个包的 payload 里找完整 section：`off + 3 + sec_len > len`
+    //   就静默 return。PMT 一超过 184 字节（流条目多、描述符多，ffmpeg 打
+    //   多音轨/HDTV 源时很常见）就永远进不了流表 → waiting_psi 永不就绪 →
+    //   **该节目的所有数据被永久丢弃**，而且没有任何错误返回或计数 ——
+    //   调用方只看到"一直在等"。
+    //
+    //   现在按 PID 攒：PUSI 处开新段（先消化 pointer_field 之前的尾巴），
+    //   收满 section_length 再解析；一段 payload 里的多个 section 也循环处理。
+    auto& acc = m_psi[pid];
+
+    if (pusi) {
+        const std::size_t pointer = payload[0];
+        if (1 + pointer > len) { return; }
+
+        // pointer_field 之前是**上一段**的尾巴，接上试试能不能收尾
+        if (pointer > 0 && !acc.empty()) {
+            acc.insert(acc.end(), payload + 1, payload + 1 + pointer);
+            drain_psi_sections(pid, acc);
+        }
+        acc.assign(payload + 1 + pointer, payload + len);
+    } else {
+        if (acc.empty()) { return; }   // 没在收：这段无从对齐，丢掉
+        acc.insert(acc.end(), payload, payload + len);
+    }
+
+    if (acc.size() > kMaxPsiSection) {   // 攒太多说明长度字段坏了，别无限涨
+        acc.clear();
+        return;
+    }
+    drain_psi_sections(pid, acc);
 }
 
 // =============================================================================
@@ -365,6 +433,20 @@ void TsDemuxer::emit_pes(std::uint16_t pid, std::vector<Frame>& out)
 //  flush / reset
 // =============================================================================
 
+std::size_t TsDemuxer::buffered_bytes() const noexcept
+{
+    std::size_t n = 0;
+    for (const auto& kv : m_pes) {
+        n += kv.second.data.size();
+    }
+    return n;
+}
+
+void TsDemuxer::discard_partial()
+{
+    m_pes.clear();
+}
+
 void TsDemuxer::flush(std::vector<Frame>& out)
 {
     // 把每个 PID 的残留都交出去（flush 之后流结束，剩下的半条 PES 也算一帧）
@@ -384,7 +466,8 @@ void TsDemuxer::reset()
     m_programs.clear();
     m_streams.clear();
     m_pes.clear();
-    m_skipped = 0;
+    m_skipped        = 0;
+    m_resync_skipped = 0;
     m_resyncs = 0;
     m_bad = 0;
 }

@@ -98,24 +98,36 @@ struct DemuxerConfig {
     ///       但**不终止流** —— 恢复同步后继续工作。
     std::size_t max_buffered_bytes = 4u * 1024u * 1024u;
 
-    /// 单帧上限（字节）。超长视为异常帧：截断后以 incomplete 标志吐出，计 parse_errors。
+    /// 单帧上限（字节）。超长视为异常帧：**整帧丢弃**、计 parse_errors。
+    ///
+    /// @note 文档以前写的是"截断后以 incomplete 标志吐出"，但
+    ///       ① 实现是直接丢弃；② `FrameInfo` 里根本没有 incomplete 字段。
+    ///       丢弃对解码器其实更友好（半帧解码只会花屏）—— 这里把文本改成事实。
     /// 默认 4 MiB（1080p IDR 通常 < 1 MiB）。
     std::size_t max_frame_bytes = 4u * 1024u * 1024u;
 
-    /// TS 判定同步所需的连续包数（>= 2）。默认 3。
-    /// 提高可降低误同步概率，代价是启动时多等 (n-1)*188 字节。
-    std::size_t ts_sync_packets = 3;
+    /// TS 判定同步所需的连续包数（>= 2）。
+    ///
+    /// @warning **当前未实现**：同步判定硬编码为 3 个连续 0x47（间隔 188），
+    ///          这个字段不被读取。改它不会有任何效果。
 
     /// 连续失步达到该字节数即认为本流已无法恢复，feed() 返回 sync_lost。
     /// 默认 256 KiB。设为 0 表示永不放弃（一直搜索）。
     std::size_t ts_max_resync_bytes = 256u * 1024u;
 
-    /// `flush()` 时是否把未结束的 PES 也吐出来（带 incomplete 标志）。
+    /// `flush()` 时是否把未结束的 PES 也吐出来。
+    ///
     /// 默认 false —— 截断的帧对下游没有价值，且可能被误当完整帧解码。
+    /// PS / TS **两条路径都遵守**这个开关（以前 TS 侧无条件吐）。
+    ///
+    /// @note 吐出的残帧**不带** incomplete 标志（`FrameInfo` 里没有这个字段），
+    ///       所以打开它意味着"调用方自己保证能识别半帧"。
     bool emit_partial_on_flush = false;
 
     /// 是否在 `aud` 边界切分视频帧（TS/PS 里一帧可能含多个 AUD）。
     /// 默认 false：按 PES 边界切，与容器保持一致（推荐）。
+    ///
+    /// @warning **当前未实现**：这个字段不被读取，视频帧始终按 PES 边界切。
     bool split_video_by_aud = false;
 };
 
@@ -226,11 +238,20 @@ public:
     ///
     /// @note 统计**清零**。原因：复位后的数据属于"新的开始"，把上一路流的
     ///       计数混进来只会误导。要跨复位观察问题，调用方自己累加即可 ——
-    ///       而真正该看的其实是 `stats()` 里的 `sync_lost` / `buffer_overflow`
-    ///       / `malformed_packets`，那些才反映"流本身有什么问题"。
+    ///       而真正该看的其实是 `stats()` 里的 `resyncs` / `parse_errors` /
+    ///       `overflow_drops`，那些才反映"流本身有什么问题"。
+    ///
+    /// @note 以前这里写的是 `sync_lost` / `malformed_packets` —— **这两个字段
+    ///       在 DemuxStats 里不存在**，是想当然写下的名字。
     void reset() noexcept;
 
     /// 是否处于 failed 状态（L4 之后、reset 之前）。
+    ///
+    /// @warning **当前恒为 false**：实现里没有任何路径把 `failed` 置位
+    ///          （`feed()` 会检查它、`reset()` 会清它，中间没人写）。
+    ///          L4（out_of_memory / internal_error）目前没有任何来源 ——
+    ///          也就是说"进入 failed 态后必须 reset() 才能继续"这条契约
+    ///          还没有被实现。调用方不要依赖它做状态判断。
     [[nodiscard]] bool failed() const noexcept;
 
     /// 统计快照。

@@ -195,6 +195,52 @@ jobs:
           fi
 
   # ---------------------------------------------------------------------------
+  # TSan（数据竞争）
+  #
+  # ASan/UBSan 抓不到数据竞争：两个线程同时碰一块内存，读到的值"碰巧对"时
+  # 一点症状都没有。本库主体是单线程的（Muxer/Demuxer 都写明非线程安全），
+  # 但 mux/demux 的**回调**、以及测试里的多线程用法仍值得盯一眼。
+  #
+  # 2026-11 首次跑是 0 条，所以**不留 suppression**：再报就是真问题。
+  #
+  # ⚠ 注意：CI 上没有 /tmp 下的测试素材，依赖素材的用例会自行"跳过并返回 0"。
+  #    这个 job 实际覆盖到的是 test_main / test_ts_multiprogram /
+  #    test_split_invariance / test_ps_oversize 这四个不依赖素材的用例。
+  #    （"缺素材即跳过"本身是个已知盲区，单独处理。）
+  # ---------------------------------------------------------------------------
+  tsan:
+    name: TSan
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+
+    steps:
+      - name: 检出
+        uses: actions/checkout@v4
+
+      - name: 安装工具
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y cmake ninja-build g++
+
+      - name: 配置（Debug + TSan）
+        run: |
+          cmake -S . -B build-tsan -G Ninja \
+                -DCMAKE_BUILD_TYPE=Debug \
+                -DCMAKE_C_FLAGS="-fsanitize=thread -fno-omit-frame-pointer -g -O1" \
+                -DCMAKE_CXX_FLAGS="-fsanitize=thread -fno-omit-frame-pointer -g -O1" \
+                -DCMAKE_EXE_LINKER_FLAGS="-fsanitize=thread" \
+                -DMPEGMECH_BUILD_TESTS=ON \
+                -DMPEGMECH_BUILD_EXAMPLES=OFF
+
+      - name: 构建
+        run: cmake --build build-tsan --parallel
+
+      - name: 测试（报告任何数据竞争即失败）
+        env:
+          TSAN_OPTIONS: halt_on_error=1:second_deadlock_stack=1
+        run: ctest --test-dir build-tsan --output-on-failure --timeout 300
+
+  # ---------------------------------------------------------------------------
   # 质量门禁
   # ---------------------------------------------------------------------------
   quality:

@@ -398,6 +398,11 @@ int main()
 
             DemuxerConfig dc;
             dc.container = Container::unknown;
+            // 这条用例要验"ffmpeg 的帧一条不少"，包括末尾那条**没有正常结束**的
+            // 残 PES —— 所以要显式打开这个开关。
+            // 默认是关的：把半条 PES 当完整帧交给解码器，末帧会花屏
+            // （TS 的残帧没有 incomplete 标志可打，只能选择"不吐"）。
+            dc.emit_partial_on_flush = true;
             auto dx = Demuxer::create(dc,
                 [&got](const FrameInfo& fi, span<const std::uint8_t> es) {
                     got.push_back({fi.stream_id, fi.pts,

@@ -38,7 +38,13 @@ struct AacConfig {
 /// 写 7 字节 ADTS 头（无 CRC）。
 ///
 /// @param frame_len 含 ADTS 头的总长度（= 7 + 裸帧长度）
-void build_adts_header(Bytes& out, const AacConfig& cfg, std::size_t frame_len);
+/// @return false = 帧长超过 ADTS 能表达的上限（13 位，8183 字节）。
+///
+/// @note 失败时**不会**往 `out` 写任何字节。以前是静默钳位到 0x1FFF ——
+///       那会得到一个"同步字合法、长度撒谎"的头，下游按它切帧从此错位，
+///       比干脆没有头更难查。
+[[nodiscard]] bool build_adts_header(Bytes& out, const AacConfig& cfg,
+                                     std::size_t frame_len);
 
 } // namespace detail
 } // namespace mpegmech

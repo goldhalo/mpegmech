@@ -13,8 +13,13 @@
 //    信息），mux 的输入是裸 ES（不含长度字段），两者条件不同。
 //  * **输出走回调**：每次回调交出一段**完整可发送**的字节（TS 是 188 的整数倍，
 //    PS 是一个完整 pack）。调用方可以直接 send / write，不必再攒。
-//  * 时间戳单位 90 kHz，调用方负责单调递增；本库不做时间基重映射，
-//    只在 TS 侧按 `pcr_period_ms` 插入 PCR（取最近一个写入帧的 dts）。
+//  * 时间戳单位 90 kHz，调用方负责单调递增；本库不做时间基重映射。
+//
+//  ⚠ **PCR 当前未实现**：TS 输出里不含 PCR，`pcr_period_ms` / `pcr_pid`
+//    两个配置项与 `MuxStats::pcr_sent` 计数都是预留位（pcr_sent 恒为 0）。
+//    下游若是靠 PCR 恢复时钟的硬件解码器/机顶盒，请自行在 TS 之外补，
+//    或等这个特性落地 —— 以前头文件写的是"会按 pcr_period_ms 插入 PCR"，
+//    那是**没有兑现**的承诺。
 // =============================================================================
 #pragma once
 
@@ -77,15 +82,22 @@ struct MuxerConfig {
     std::uint16_t pmt_pid = 0x1000;
 
     /// TS：PCR 承载 PID。0 = 用第一条视频流（无视频则用第一条音频）。
+    ///
+    /// @warning **当前未被读取**（PCR 未实现，见文件头的说明）。
     std::uint16_t pcr_pid = 0;
 
-    /// TS：PCR 插入间隔（毫秒）。0 = 不插 PCR。默认 40 ms（约 25 帧/秒）。
+    /// TS：PCR 插入间隔（毫秒）。0 = 不插 PCR。
+    ///
+    /// @warning **当前未实现**：无论设成多少，TS 输出里都不会有 PCR。
     std::int32_t pcr_period_ms = 40;
 
     /// TS：PAT/PMT 重发间隔（毫秒）。默认 100 ms。设为 0 只在流启动时发一次。
     std::int32_t psi_period_ms = 100;
 
-    /// PS：单个 pack 的目标上限（字节），超过即切下一个 pack。默认 64 KiB。
+    /// PS：单个 pack 的目标上限（字节）。
+    ///
+    /// @warning **当前未实现**：每个 PES 独立成包、写完即发，
+    ///          没有"凑满 64 KiB 才切下一个 pack"的逻辑（这个字段不被读取）。
     std::size_t ps_pack_bytes = 64u * 1024u;
 
     /// PS：是否输出 system_header（0x000001BB）。默认 true（兼容性更好）。
@@ -107,7 +119,12 @@ struct MuxStats {
     std::uint64_t bytes_out    = 0;  ///< 回调交出的总字节
     std::uint64_t packets_out  = 0;  ///< TS: 188 字节包数；PS: pack 数
     std::uint64_t psi_sent     = 0;  ///< PAT/PMT 发送次数（PS: PSM 次数）
-    std::uint64_t pcr_sent     = 0;  ///< PCR 插入次数
+    /// PCR 插入次数。**恒为 0**（PCR 未实现）。
+    /// PS 下因单帧超过 PES 长度上限（65535）被拒的帧数。
+    ///
+    /// @note 这类帧**不可能**用 PS 表达（PES_packet_length 是 16 位，而 PS 没有
+    ///       TS 那种"不定长"的用法），所以只能拒收，让调用方有机会降码率/降分辨率。
+    std::uint64_t oversize_drops = 0;
 };
 
 // -----------------------------------------------------------------------------

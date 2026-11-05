@@ -40,7 +40,7 @@ AacConfig parse_asc(const std::uint8_t* asc, std::size_t len) noexcept
     return cfg;
 }
 
-void build_adts_header(Bytes& out, const AacConfig& cfg, std::size_t frame_len)
+bool build_adts_header(Bytes& out, const AacConfig& cfg, std::size_t frame_len)
 {
     // ADTS 七字节（无 CRC）：
     //
@@ -52,8 +52,13 @@ void build_adts_header(Bytes& out, const AacConfig& cfg, std::size_t frame_len)
     //  byte5: frame_len[2..0] | buffer_fullness[10..6]
     //  byte6: buffer_fullness[5..0] | num_raw_blocks
 
-    const std::uint16_t len = static_cast<std::uint16_t>(
-        (frame_len > 0x1FFFu) ? 0x1FFFu : frame_len);
+    // frame_length 只有 13 位：装不下就**报错**，不要钳位。
+    // 钳位会写出"同步字合法、长度撒谎"的头，下游按 8191 切帧从此错位 ——
+    // 那是无声错位，比"没有头"难查得多。
+    if (frame_len > 0x1FFFu) {
+        return false;
+    }
+    const std::uint16_t len = static_cast<std::uint16_t>(frame_len);
 
     out.push_back(0xFF);
 
@@ -77,6 +82,7 @@ void build_adts_header(Bytes& out, const AacConfig& cfg, std::size_t frame_len)
 
     // buffer_fullness 低 6 位 + num_raw_blocks=0
     out.push_back(0xFC);
+    return true;
 }
 
 } // namespace detail

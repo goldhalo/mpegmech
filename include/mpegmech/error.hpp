@@ -58,7 +58,11 @@ enum class MpegErrc {
     sync_lost,                ///< 连续失步超过 ts_max_resync_bytes，本流已放弃
     buffer_overflow,          ///< 内部暂存达到上限，已按策略丢弃最旧数据
     stream_not_found,         ///< stream_id 不存在
-    capacity_exceeded,        ///< 流数量超上限（TS 单节目 16 路 / PS 32 路）
+    /// 流数量超上限（TS 单节目 16 路 / PS 32 路）。
+    ///
+    /// @warning **当前没有任何返回点**：`addStream()` 不检查流数上限，
+    ///          这个错误码只是预留。`Muxer::create` 也不会因为它失败。
+    capacity_exceeded,
 
     // ---- L3：失步类（不中断，统计可见）----
     waiting_psi,              ///< TS 包已对齐，但还没收到 PAT/PMT（继续喂即可）

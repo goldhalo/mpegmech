@@ -166,9 +166,13 @@ public:
 
         auto& st = streams[static_cast<std::size_t>(sid)];
 
-        // PTS 单调性检查
+        // PTS 单调性检查。
+        //
+        // 这是**调用方**传错了时间戳（L1），不是流数据坏了（L2）——
+        // 按 error.hpp 的分级应当返回 invalid_argument：调用方看到 malformed
+        // 会去怀疑输入数据，而真正该改的是它自己的时间轴。
         if (st.has_pts && pts < st.last_pts && !cfg.allow_pts_rewind) {
-            return make_error_code(MpegErrc::malformed);
+            return make_error_code(MpegErrc::invalid_argument);
         }
 
         // ---- 容器相关的头部 ----
@@ -205,11 +209,29 @@ public:
             payload_len += 7;
         }
 
+        // ★ PS 里 PES_packet_length 是 16 位，而 PS **没有**"不定长"这个逃生口
+        //   （不定长是 TS 的用法，靠 PUSI + 188 包边界分界；ffmpeg 对 PS 里的
+        //   length=0 直接报 "could not find codec parameters"）。
+        //
+        //   以前超长时静默写 0：产出的流看起来正常，实际**整帧解不出来**，
+        //   而且 write() 返回值也不告诉调用方。1080p 的 IDR 普遍 50~200 KB，
+        //   超过 65535 是常态而不是例外 —— 必须在这里拦住。
+        if (cfg.container == Container::ps) {
+            const std::size_t hdr = 3 + 5 + ((dts != pts) ? 5 : 0);
+            if (hdr + payload_len > 0xFFFF) {
+                ++stats.oversize_drops;
+                return make_error_code(MpegErrc::invalid_argument);
+            }
+        }
+
         std::vector<std::uint8_t> pes;
         detail::build_pes_header(pes, st.stream_id, pts, dts, payload_len,
                                  /*explicit_len=*/true);
         if (st.add_adts) {
-            detail::build_adts_header(pes, st.aac, payload_len);
+            // 帧长装不进 ADTS 的 13 位（>8183）：报错，不要写出撒谎的头
+            if (!detail::build_adts_header(pes, st.aac, payload_len)) {
+                return make_error_code(MpegErrc::invalid_argument);
+            }
         }
         pes.insert(pes.end(), es.begin(), es.end());
 

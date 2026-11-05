@@ -61,19 +61,39 @@ public:
     /// 冲刷残留。
     void flush(std::vector<Frame>& out);
 
+    /// 丢弃所有未收完的 PES，不产出任何帧（`flush()` 的"静默"版本）。
+    void discard_partial();
+
     /// 重置。
     void reset();
 
     [[nodiscard]] TsSyncState state() const noexcept { return m_state; }
     [[nodiscard]] const std::vector<TsEsInfo>& streams() const noexcept { return m_streams; }
+    /// 所有 PID 未收完的 PES 载荷总字节（缓冲上限判据）。
+    [[nodiscard]] std::size_t buffered_bytes() const noexcept;
+
     [[nodiscard]] std::uint64_t bytes_skipped() const noexcept { return m_skipped; }
+
+    /// **本次失步以来**跳过的字节数（重新同步成功即清零）。
+    ///
+    /// 与 `bytes_skipped()`（lifetime 累计，只用于统计）不同：判断"这条流还有救吗"
+    /// 必须看这个 —— 长播流上累计值只会单调上涨，拿它当判据会让每一次网络毛刺
+    /// 都被误判成 `sync_lost`。
+    [[nodiscard]] std::uint64_t resync_skipped() const noexcept
+    {
+        return m_resync_skipped;
+    }
     [[nodiscard]] std::uint64_t resyncs() const noexcept { return m_resyncs; }
     [[nodiscard]] std::uint64_t bad_packets() const noexcept { return m_bad; }
     [[nodiscard]] std::size_t buffered() const noexcept { return m_buf.size() - m_scan; }
 
 private:
     void parse_packet(const std::uint8_t* pkt, std::vector<Frame>& out);
-    void parse_psi(const std::uint8_t* payload, std::size_t len, std::uint16_t pid);
+    void parse_psi(const std::uint8_t* payload, std::size_t len, std::uint16_t pid,
+                   bool pusi);
+    void drain_psi_sections(std::uint16_t pid, std::vector<std::uint8_t>& acc);
+    void handle_psi_section(const std::uint8_t* sec, std::size_t total,
+                            std::uint16_t pid);
     void parse_pes(std::uint16_t pid, const std::uint8_t* payload, std::size_t len,
                    bool pusi, std::vector<Frame>& out);
     void emit_pes(std::uint16_t pid, std::vector<Frame>& out);
@@ -90,6 +110,12 @@ private:
     std::map<std::uint16_t, std::uint16_t> m_programs;
     std::vector<TsEsInfo>                  m_streams;
 
+    /// 每个 PSI PID 的 section 重组缓冲（PMT 可能跨包）。
+    std::map<std::uint16_t, std::vector<std::uint8_t>> m_psi;
+
+    /// 单条 PSI section 的上限（section_length 是 12 位，理论最大 4095）。
+    static constexpr std::size_t kMaxPsiSection = 4096;
+
     // 每个 PID 的 PES 累积
     struct PesAccum {
         std::vector<std::uint8_t> data;
@@ -98,7 +124,8 @@ private:
     std::map<std::uint16_t, PesAccum> m_pes;
 
     // 统计
-    std::uint64_t m_skipped = 0;
+    std::uint64_t m_skipped        = 0;
+    std::uint64_t m_resync_skipped = 0;
     std::uint64_t m_resyncs = 0;
     std::uint64_t m_bad     = 0;
 };

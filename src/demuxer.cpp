@@ -109,6 +109,14 @@ bool looks_key(Codec codec, const std::uint8_t* p, std::size_t len) noexcept
             } else if (codec == Codec::h265) {
                 const std::uint8_t t = (p[i + 3] >> 1) & 0x3F;
                 if (t >= 16 && t <= 21) { return true; }            // BLA..CRA
+            } else if (codec == Codec::h266) {
+                // H.266 的 NAL header 是 2 字节：type 占 bits 1..5
+                // （与 H.265 同位），IDR_W_RADL=7 / IDR_N_LP=8 / CRA=9 /
+                // GDR=10 / RSV_IRAP_11=11 —— 都是"可以起播"的帧。
+                if (i + 4 < len) {
+                    const std::uint8_t t = static_cast<std::uint8_t>((p[i + 4] >> 3) & 0x1F);
+                    if (t >= 7 && t <= 11) { return true; }
+                }
             }
         }
     }
@@ -379,9 +387,15 @@ public:
         stats.resyncs       = ts.resyncs();
         stats.parse_errors  = ts.bad_packets() + ts_frame_errors;
 
+        // ★ 判据必须是"**本次**失步以来跳过了多少"，不是 lifetime 累计。
+        //
+        //   以前用 bytes_skipped()（只在 reset() 清零）：长播流上它只会单调上涨，
+        //   过阈值之后**每一次一个字节的网络毛刺都会立刻返回 sync_lost** ——
+        //   把"抖动容忍"的防御机制变成了"长播流必炸"。调用方按契约会认为
+        //   整条流已放弃（需要 reset()），于是一路还活着的流被丢掉。
         if (cfg.ts_max_resync_bytes != 0 &&
             ts.state() == detail::TsSyncState::searching &&
-            ts.bytes_skipped() > cfg.ts_max_resync_bytes) {
+            ts.resync_skipped() > cfg.ts_max_resync_bytes) {
             return make_error_code(MpegErrc::sync_lost);
         }
         return {};
@@ -391,7 +405,26 @@ public:
     {
         std::vector<detail::TsDemuxer::Frame> frames;
         ts.feed(p, n, frames);
-        return dispatch_ts(frames);
+        auto ec = dispatch_ts(frames);
+        if (ec) {
+            return ec;
+        }
+
+        // ★ 缓冲上限对 TS 同样成立。
+        //
+        //   以前 `max_buffered_bytes` 只在 PS 路径检查，TS 的每-PID PES 累积是
+        //   **无界**的：`pes_len == 0`（视频标配的不定长 PES）在等到下一条 PUSI
+        //   之前会一直涨。从流中间接入、PID 长期不给 PUSI（受损流/流切换残留）、
+        //   恶意构造的"PUSI + 无界尾巴"都能把内存撑爆。
+        //   而 demuxer.hpp 对两条路径承诺的是同一套语义（丢最旧 + buffer_overflow）。
+        if (cfg.max_buffered_bytes != 0 &&
+            ts.buffered_bytes() > cfg.max_buffered_bytes) {
+            ++stats.overflow_drops;
+            stats.bytes_skipped += ts.buffered_bytes();
+            ts.discard_partial();     // PES 只能整条丢（半个 PES 没有意义）
+            return make_error_code(MpegErrc::buffer_overflow);
+        }
+        return {};
     }
 
     // ---- 主循环 ----
@@ -422,7 +455,13 @@ public:
             detected = sniffContainer(span<const std::uint8_t>(in.data(), in.size()));
             if (detected == Container::unknown) {
                 if (in.size() < kSniffBytes) { return {}; }
-                detected = Container::ps;
+                // ★ 攒够了还认不出来 = 既不是 PS 也不是 TS。
+                //
+                //   以前这里强制按 PS 处理，于是 `container()` 谎报成 ps，
+                //   错误里永远只有 bytes_skipped 慢慢涨 —— 调用方完全不知道
+                //   自己喂进来的根本不是这两种容器（`unsupported_container`
+                //   这个错误码对 Demuxer 从不返回）。
+                return make_error_code(MpegErrc::unsupported_container);
             }
 
             std::vector<std::uint8_t> pending;
@@ -639,11 +678,23 @@ public:
     std::error_code flush()
     {
         if (detected == Container::ts) {
-            // TS 侧：把每个 PID 未收完的 PES 交出去。
-            // 注意 emit_partial_on_flush 对 TS 不做区分 —— PES 边界是硬边界，
-            // 残留的那条要么是最后一条完整的，要么是被截断的；
-            // 后者带不全 ES 也没有帧标志可用，所以统一按"交出"处理，
-            // 由调用方按自己的容忍度决定丢不丢。
+            // ★ 与 PS 分支保持同一套语义。
+            //
+            //   以前这里无条件把残留 PES 交出去，还把这条写成"对 TS 不做区分"
+            //   —— 但默认契约是 `emit_partial_on_flush = false`：
+            //   "截断的帧对下游没有价值，且可能被误当完整帧解码"。
+            //   断流/掉线时残留 PES 是常态，下游会把半条垃圾当完整帧送解码器，
+            //   表现就是末帧花屏或者一条损坏帧的证据。
+            //
+            //   而且 TS 的残帧**没有** incomplete 标志可打（FrameInfo 里没这个字段），
+            //   所以"交给调用方自己判"这条路本来也走不通。
+            if (!cfg.emit_partial_on_flush) {
+                ts.discard_partial();
+                in.clear();
+                scan  = 0;
+                state = State::searching;
+                return {};
+            }
             std::vector<detail::TsDemuxer::Frame> frames;
             ts.flush(frames);
             return dispatch_ts(frames);
