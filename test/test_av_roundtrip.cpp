@@ -8,6 +8,11 @@
 #include <cstdio>
 #include <cstring>
 #include <vector>
+#include <algorithm>
+#include <cstddef>
+#include <cstdint>
+#include <system_error>
+#include <utility>
 
 using namespace mpegmech;
 

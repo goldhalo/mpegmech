@@ -8,6 +8,9 @@
 
 #include "mpegmech/types.hpp"
 
+#include <cstddef>
+#include <cstdint>
+
 namespace mpegmech {
 namespace {
 

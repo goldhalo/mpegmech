@@ -5,6 +5,11 @@
 
 #include <algorithm>
 #include <cstring>
+#include <vector>
+#include <map>
+#include <cstddef>
+#include <cstdint>
+#include <utility>
 
 namespace mpegmech {
 namespace detail {

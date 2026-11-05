@@ -6,6 +6,9 @@
 
 #include <cstdio>
 #include <vector>
+#include <cstddef>
+#include <cstdint>
+#include <system_error>
 
 using namespace mpegmech;
 

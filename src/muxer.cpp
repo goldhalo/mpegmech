@@ -10,6 +10,13 @@
 #include <algorithm>
 #include <cstring>
 #include <map>
+#include <optional>
+#include <memory>
+#include <vector>
+#include <cstddef>
+#include <cstdint>
+#include <system_error>
+#include <utility>
 
 namespace mpegmech {
 

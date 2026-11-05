@@ -12,6 +12,7 @@
 
 #include <cstdint>
 #include <vector>
+#include <cstddef>
 
 namespace mpegmech {
 namespace detail {

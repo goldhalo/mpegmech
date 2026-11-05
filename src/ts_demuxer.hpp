@@ -12,6 +12,7 @@
 #include <cstdint>
 #include <map>
 #include <vector>
+#include <cstddef>
 
 #include <mpegmech/error.hpp>
 #include <mpegmech/types.hpp>   // kNoTimestamp、StreamType

@@ -14,6 +14,9 @@
 #include "ps_muxer.hpp"
 
 #include <cstring>
+#include <vector>
+#include <cstddef>
+#include <cstdint>
 
 namespace mpegmech {
 namespace detail {

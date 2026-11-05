@@ -8,6 +8,8 @@
 
 #include "mpegmech/error.hpp"
 
+#include <string>
+
 namespace mpegmech {
 namespace {
 

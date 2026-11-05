@@ -3,6 +3,9 @@
 // =============================================================================
 #include "adts.hpp"
 
+#include <cstddef>
+#include <cstdint>
+
 namespace mpegmech {
 namespace detail {
 

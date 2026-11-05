@@ -21,6 +21,10 @@
 #include <random>
 #include <string>
 #include <vector>
+#include <cstddef>
+#include <cstdint>
+#include <system_error>
+#include <utility>
 
 using namespace mpegmech;
 

@@ -32,6 +32,9 @@
 #include <random>
 #include <string>
 #include <vector>
+#include <cstddef>
+#include <cstdint>
+#include <system_error>
 
 #if defined(_WIN32)
 #  include <windows.h>

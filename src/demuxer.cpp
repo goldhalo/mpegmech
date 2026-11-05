@@ -20,6 +20,11 @@
 #include <cstring>
 #include <map>
 #include <vector>
+#include <memory>
+#include <cstddef>
+#include <cstdint>
+#include <system_error>
+#include <utility>
 
 #include "ts_demuxer.hpp"
 
