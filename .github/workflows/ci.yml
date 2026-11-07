@@ -201,9 +201,13 @@ jobs:
           ffmpeg -y -hide_banner -loglevel error \
             -f lavfi -i sine=frequency=440:sample_rate=44100:duration=3 \
             -c:a aac -b:a 64k -f adts /tmp/test.aac
-          ffmpeg -y -hide_banner -loglevel error -fflags +genpts \
-            -i /tmp/test_h264_aud.h264 -i /tmp/test.aac \
-            -c copy -map 0:v -map 1:a /tmp/ff_av.ts
+          # 直接用 lavfi 编码成 TS：把 raw H.264 用 -c copy 打进 TS 时
+          # ffmpeg 会因 "first pts and dts value must be set" 失败（EINVAL）。
+          ffmpeg -y -hide_banner -loglevel error \
+            -f lavfi -i testsrc2=size=320x240:rate=25 \
+            -f lavfi -i sine=frequency=440:sample_rate=44100:duration=3 -t 3 \
+            -c:v libx264 -x264-params aud=1 -pix_fmt yuv420p \
+            -c:a aac -b:a 64k /tmp/ff_av.ts
 
       - name: 配置（Debug + sanitizer）
         run: |
@@ -274,9 +278,13 @@ jobs:
           ffmpeg -y -hide_banner -loglevel error \
             -f lavfi -i sine=frequency=440:sample_rate=44100:duration=3 \
             -c:a aac -b:a 64k -f adts /tmp/test.aac
-          ffmpeg -y -hide_banner -loglevel error -fflags +genpts \
-            -i /tmp/test_h264_aud.h264 -i /tmp/test.aac \
-            -c copy -map 0:v -map 1:a /tmp/ff_av.ts
+          # 直接用 lavfi 编码成 TS：把 raw H.264 用 -c copy 打进 TS 时
+          # ffmpeg 会因 "first pts and dts value must be set" 失败（EINVAL）。
+          ffmpeg -y -hide_banner -loglevel error \
+            -f lavfi -i testsrc2=size=320x240:rate=25 \
+            -f lavfi -i sine=frequency=440:sample_rate=44100:duration=3 -t 3 \
+            -c:v libx264 -x264-params aud=1 -pix_fmt yuv420p \
+            -c:a aac -b:a 64k /tmp/ff_av.ts
 
       - name: 配置（Debug + TSan）
         run: |
