@@ -297,6 +297,58 @@ void test_max_buffered_zero_means_unlimited()
 }
 
 // ---------------------------------------------------------------------------
+// T14：psi_period_ms 按 PTS 差重发（不再假设 40ms/帧）
+// ---------------------------------------------------------------------------
+int count_ts_pid(const std::vector<std::uint8_t>& ts, std::uint16_t pid)
+{
+    int n = 0;
+    for (std::size_t i = 0; i + 188 <= ts.size(); i += 188) {
+        if (ts[i] != 0x47) { continue; }
+        const std::uint16_t p = static_cast<std::uint16_t>(((ts[i + 1] & 0x1F) << 8) | ts[i + 2]);
+        if (p == pid) { ++n; }
+    }
+    return n;
+}
+
+void test_psi_period_time_based()
+{
+    MuxerConfig mc;
+    mc.container     = Container::ts;
+    mc.psi_period_ms = 500;
+    std::vector<std::uint8_t> out;
+    std::error_code ec;
+    auto mx = Muxer::create(mc, [&out](span<const std::uint8_t> d) {
+        out.insert(out.end(), d.begin(), d.end());
+    }, ec);
+    if (!mx) { EXPECT(false, "TS 复用器创建"); return; }
+    StreamConfig s;
+    s.codec = Codec::h264;
+    auto sid = mx->addStream(s, ec);
+    if (!sid) { EXPECT(false, "addStream"); return; }
+
+    const std::int64_t step = 18000;   // 200ms/帧（5fps），故意不是 40ms
+    const int frames = 30;
+    for (int i = 0; i < frames; ++i) {
+        mx->write(*sid, FrameFlag::none, step * i, step * i,
+                  span<const std::uint8_t>(kFrame264, sizeof kFrame264));
+    }
+    mx->flush();
+
+    // 期望重发次数按 PTS 差独立推导
+    int expected = 1;
+    std::int64_t last = 0;
+    for (int i = 1; i < frames; ++i) {
+        if (step * i - last >= 500 * 90) {
+            ++expected;
+            last = step * i;
+        }
+    }
+    EXPECT(expected == 10, "推导出的期望重发次数应为 10");
+    EXPECT(count_ts_pid(out, 0x0000) == expected,
+           "PAT 应按 PTS 差重发（旧实现假设 40ms/帧，会少发到 3 次）");
+}
+
+// ---------------------------------------------------------------------------
 // T11：PS 自动 stream_id 用尽（视频 0xE0..0xEF / 音频 0xC0..0xDF）
 // ---------------------------------------------------------------------------
 void test_ps_streamid_exhausted()
@@ -330,6 +382,7 @@ int main()
     test_codec_fallback_unknown();
     test_max_buffered_zero_means_unlimited();
     test_ps_streamid_exhausted();
+    test_psi_period_time_based();
     if (g_fail == 0) {
         std::printf("全部通过\n");
         return 0;

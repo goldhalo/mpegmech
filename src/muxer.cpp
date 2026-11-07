@@ -67,6 +67,8 @@ public:
     std::uint64_t frames_since_psi = 0;
     std::uint16_t pcr_pid = 0;
     bool          ts_psi_sent_once = false;
+    /// 上次发 PAT/PMT 时的 PTS（kNoTimestamp = 该流还没带过 PTS）。
+    std::int64_t  last_psi_pts = kNoTimestamp;
 
     std::vector<StreamState> streams;
     detail::Bytes            buf;        ///< 组包缓冲（复用，减少分配）
@@ -186,17 +188,28 @@ public:
                 st.sent_header = true;
             }
         } else {
-            // TS：PAT/PMT 按周期重发；第一帧前必发
+            // TS：PAT/PMT 按周期重发；第一帧前必发。
+            //
+            // 以前用 `frames_since_psi >= psi_period_ms / 40` 估算 —— 只有
+            // 25 fps 时才是对的。现在优先按 **PTS 差**（90 kHz）计算，
+            // 没有 PTS 时才退回 40 ms/帧 的帧数估算。
             ++frames_since_psi;
-            const std::size_t period = (cfg.psi_period_ms <= 0)
-                                           ? 0
-                                           : static_cast<std::size_t>(cfg.psi_period_ms / 40);
-            if (!st.sent_header || (period != 0 && frames_since_psi >= period)) {
+            bool send_psi = !st.sent_header || !ts_psi_sent_once;
+            if (!send_psi && cfg.psi_period_ms > 0) {
+                const std::int64_t period_90k =
+                    static_cast<std::int64_t>(cfg.psi_period_ms) * (kClockHz / 1000);
+                if (pts != kNoTimestamp && last_psi_pts != kNoTimestamp) {
+                    send_psi = (pts - last_psi_pts) >= period_90k;
+                } else {
+                    send_psi = frames_since_psi >=
+                               static_cast<std::size_t>(cfg.psi_period_ms / 40);
+                }
+            }
+            if (send_psi) {
                 emit_ts_psi();
-                st.sent_header = true;
-            } else if (!ts_psi_sent_once) {
-                emit_ts_psi();
+                st.sent_header   = true;
                 ts_psi_sent_once = true;
+                last_psi_pts     = pts;
             }
         }
 

@@ -92,6 +92,9 @@ struct MuxerConfig {
     std::int32_t pcr_period_ms = 40;
 
     /// TS：PAT/PMT 重发间隔（毫秒）。默认 100 ms。设为 0 只在流启动时发一次。
+    ///
+    /// 按相邻两次重发的 **PTS 差**（90 kHz）计算；PTS 缺省时退回
+    /// "每 40 ms 一帧"的帧数估算（旧行为，仅 25 fps 下准确）。
     std::int32_t psi_period_ms = 100;
 
     /// PS：单个 pack 的目标上限（字节）。
