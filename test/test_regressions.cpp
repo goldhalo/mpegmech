@@ -34,6 +34,28 @@ int g_fail = 0;
 
 const std::uint8_t kFrame264[] = {0x00, 0x00, 0x00, 0x01, 0x65, 0x88, 0x84, 0x21};
 
+/// MPEG-2 CRC32（与库内实现同参数），用于给手拼的 PAT/PMT 补 CRC。
+std::uint32_t crc32_mpeg2_local(const std::uint8_t* data, std::size_t len)
+{
+    std::uint32_t crc = 0xFFFFFFFFu;
+    for (std::size_t i = 0; i < len; ++i) {
+        crc ^= static_cast<std::uint32_t>(data[i]) << 24;
+        for (int b = 0; b < 8; ++b) {
+            crc = (crc & 0x80000000u) ? ((crc << 1) ^ 0x04C11DB7u) : (crc << 1);
+        }
+    }
+    return crc;
+}
+
+void append_crc(std::vector<std::uint8_t>& sec)
+{
+    const std::uint32_t c = crc32_mpeg2_local(sec.data(), sec.size());
+    sec.push_back(static_cast<std::uint8_t>(c >> 24));
+    sec.push_back(static_cast<std::uint8_t>((c >> 16) & 0xFF));
+    sec.push_back(static_cast<std::uint8_t>((c >> 8) & 0xFF));
+    sec.push_back(static_cast<std::uint8_t>(c & 0xFF));
+}
+
 /// 用本库复用器产出一段 PS（给 P1-2 / P1-3 用）。
 std::vector<std::uint8_t> mux_ps(int frames, std::int64_t pts, std::int64_t dts)
 {
@@ -225,22 +247,23 @@ void append_packet(std::vector<std::uint8_t>& out, std::uint16_t pid, bool pusi,
 void test_ts_resync_drops_partial_pes()
 {
     // PAT：program 1 → PMT PID 0x1000
-    const std::uint8_t pat_sec[] = {
+    std::vector<std::uint8_t> pat_sec = {
         0x00, 0xB0, 0x0D, 0x00, 0x01, 0xC1, 0x00, 0x00,
-        0x00, 0x01, 0xF0, 0x00, 0x00, 0x00, 0x00, 0x00,
+        0x00, 0x01, 0xF0, 0x00,
     };
+    append_crc(pat_sec);
     std::vector<std::uint8_t> pat_payload(1, 0x00);   // pointer_field
-    pat_payload.insert(pat_payload.end(), pat_sec, pat_sec + sizeof pat_sec);
+    pat_payload.insert(pat_payload.end(), pat_sec.begin(), pat_sec.end());
 
     // PMT：program 1 下一条 H.264 ES，PID 0x0100，PCR_PID 0x0100
-    const std::uint8_t pmt_sec[] = {
+    std::vector<std::uint8_t> pmt_sec = {
         0x02, 0xB0, 0x12, 0x00, 0x01, 0xC1, 0x00, 0x00,
         0xE1, 0x00, 0xF0, 0x00,
         0x1B, 0xE1, 0x00, 0xF0, 0x00,
-        0x00, 0x00, 0x00, 0x00,
     };
+    append_crc(pmt_sec);
     std::vector<std::uint8_t> pmt_payload(1, 0x00);
-    pmt_payload.insert(pmt_payload.end(), pmt_sec, pmt_sec + sizeof pmt_sec);
+    pmt_payload.insert(pmt_payload.end(), pmt_sec.begin(), pmt_sec.end());
 
     // 一条不定长 PES（长度字段=0）：先给两包数据，但不关闭
     std::vector<std::uint8_t> pes;

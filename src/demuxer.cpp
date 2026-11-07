@@ -27,6 +27,7 @@
 #include <utility>
 
 #include "ts_demuxer.hpp"
+#include "ts_muxer.hpp"   // crc32_mpeg2
 
 namespace mpegmech {
 
@@ -49,6 +50,14 @@ std::size_t startcode_len(const std::uint8_t* p, std::size_t avail) noexcept
 std::uint16_t get16(const std::uint8_t* p) noexcept
 {
     return static_cast<std::uint16_t>((p[0] << 8) | p[1]);
+}
+
+std::uint32_t get32(const std::uint8_t* p) noexcept
+{
+    return (static_cast<std::uint32_t>(p[0]) << 24) |
+           (static_cast<std::uint32_t>(p[1]) << 16) |
+           (static_cast<std::uint32_t>(p[2]) << 8) |
+           static_cast<std::uint32_t>(p[3]);
 }
 
 /// 解 5 字节 PTS/DTS 编码。
@@ -79,11 +88,14 @@ Codec codec_of(std::uint8_t st) noexcept
     }
 }
 
-/// 按 stream_id 猜 codec（PSM 缺失时的兜底）。
+/// PSM 缺失时**不再**按 stream_id 猜 codec。
+///
+/// 以前把 0xE0..0xEF 猜成 H.264、0xC0..0xDF 猜成 AAC —— 但 GB28181 里
+/// 0xC0 起的常是 G.711，被猜成 AAC 后下游解码必错。PS 的 codec 只认 PSM，
+/// 缺 PSM 就返回 unknown，让调用方自己决定（诚实优于瞎猜）。
 Codec codec_by_stream_id(std::uint8_t sid) noexcept
 {
-    if (sid >= 0xE0 && sid <= 0xEF) { return Codec::h264; }   // 视频，默认 H264
-    if (sid >= 0xC0 && sid <= 0xDF) { return Codec::aac;  }   // 音频，默认 AAC
+    (void)sid;
     return Codec::unknown;
 }
 
@@ -510,7 +522,8 @@ public:
             in.insert(in.end(), data.begin(), data.end());
         }
 
-        if (in.size() - scan > cfg.max_buffered_bytes) {
+        // 0 = 不限制（与 ts_max_resync_bytes 的 0 语义一致）
+        if (cfg.max_buffered_bytes != 0 && in.size() - scan > cfg.max_buffered_bytes) {
             ++stats.overflow_drops;
             const std::size_t keep = cfg.max_buffered_bytes / 2;
             const std::size_t drop = in.size() - keep;
@@ -685,6 +698,14 @@ public:
         //           program_stream_info_length(2) + info
         //           elementary_stream_map_length(2) + entries
         if (len < 4) { return; }
+
+        // CRC32 校验：坏 PSM 直接丢弃 —— G.711 这类只能靠 PSM 识别的流
+        // 若被损坏的映射表误导，会解出错误的 codec。
+        if (detail::crc32_mpeg2(in.data() + at, len - 4) != get32(in.data() + at + len - 4)) {
+            ++stats.parse_errors;
+            return;
+        }
+
         const std::size_t info_len = get16(in.data() + at + 2);
         std::size_t p = at + 4 + info_len;
         if (p + 2 > at + len) { return; }

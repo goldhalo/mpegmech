@@ -14,13 +14,14 @@
 #include <vector>
 #include <cstddef>
 
+// TS 包长常量与解封装头共用：以前 ts_muxer.hpp / ts_demuxer.hpp 各定义
+// 一份，任一 TU 同时包含两个头就报 redefinition of kTsPacketSize。
+#include "ts_demuxer.hpp"
+
 namespace mpegmech {
 namespace detail {
 
 using Bytes = std::vector<std::uint8_t>;
-
-/// TS 包大小。
-constexpr std::size_t kTsPacketSize = 188;
 
 /// MPEG-2 CRC32（多项式 0x04C11DB7，初值 0xFFFFFFFF，不取反）。
 std::uint32_t crc32_mpeg2(const std::uint8_t* data, std::size_t len) noexcept;

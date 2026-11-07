@@ -310,14 +310,26 @@ public:
         if (sc.stream_id != 0) {
             st.stream_id = sc.stream_id;
         } else {
+            // 只看同类流（视频/音频各用一段区间），取"已用的最大 id + 1"。
+            // 以前的条件把"区间基址"和"当前 base"比较：base 一变，后续同类
+            // 流就全被跳过 —— 第 3 条同类流会拿到重复的 stream_id。
             std::uint8_t base = isVideo(sc.codec) ? 0xE0 : 0xC0;
             for (const auto& s : streams) {
-                if ((isVideo(s.cfg.codec) ? 0xE0 : 0xC0) == base &&
-                    s.stream_id >= base) {
+                if (isVideo(s.cfg.codec) != isVideo(sc.codec)) { continue; }
+                if (s.stream_id >= base) {
                     base = static_cast<std::uint8_t>(s.stream_id + 1);
                 }
             }
             st.stream_id = base;
+        }
+
+        // PS 的 stream_id 区间是规范硬约束：视频 0xE0..0xEF、音频 0xC0..0xDF。
+        // 自动分配越过上限时必须拒绝（以前会给出 0xF0+，对端解不了）。
+        if (sc.stream_id == 0) {
+            const std::uint8_t limit = isVideo(sc.codec) ? 0xEF : 0xDF;
+            if (st.stream_id > limit) {
+                return make_error_code(MpegErrc::capacity_exceeded);
+            }
         }
 
         // AAC + add_adts：从 extradata（AudioSpecificConfig）解析 ADTS 参数

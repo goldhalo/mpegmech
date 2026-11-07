@@ -3,6 +3,8 @@
 // =============================================================================
 #include "ts_demuxer.hpp"
 
+#include "ts_muxer.hpp"   // crc32_mpeg2
+
 #include <algorithm>
 #include <cstring>
 #include <vector>
@@ -19,6 +21,14 @@ namespace {
 std::uint16_t get16(const std::uint8_t* p) noexcept
 {
     return static_cast<std::uint16_t>((p[0] << 8) | p[1]);
+}
+
+std::uint32_t get32(const std::uint8_t* p) noexcept
+{
+    return (static_cast<std::uint32_t>(p[0]) << 24) |
+           (static_cast<std::uint32_t>(p[1]) << 16) |
+           (static_cast<std::uint32_t>(p[2]) << 8) |
+           static_cast<std::uint32_t>(p[3]);
 }
 
 std::int64_t get_timestamp(const std::uint8_t* p) noexcept
@@ -190,6 +200,13 @@ void TsDemuxer::handle_psi_section(const std::uint8_t* sec, std::size_t total,
     if (total < 4) { return; }
     const std::uint8_t table_id = sec[0];
     const std::size_t  end      = total - 4;      // 去掉 CRC32
+
+    // CRC32 校验：坏表直接丢弃（否则错误 PAT/PMT 会被当成有效流表，
+    // 解出错误的 PID 集合）。以前完全不校验，损坏的 PSI 会被静默接受。
+    if (crc32_mpeg2(sec, total - 4) != get32(sec + total - 4)) {
+        ++m_bad;
+        return;
+    }
 
     if (pid == 0x0000) {
         if (table_id != 0x00) { return; }

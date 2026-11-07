@@ -96,6 +96,7 @@ struct DemuxerConfig {
     ///
     /// @note 触发上限通常意味着调用方喂得太快或下游消费太慢，属于异常，
     ///       但**不终止流** —— 恢复同步后继续工作。
+    ///       设为 **0 表示不限制**（与 `ts_max_resync_bytes` 的 0 语义一致）。
     std::size_t max_buffered_bytes = 4u * 1024u * 1024u;
 
     /// 单帧上限（字节）。超长视为异常帧：**整帧丢弃**、计 parse_errors。

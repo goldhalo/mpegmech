@@ -355,12 +355,12 @@ void test_addstream_validation()
         auto mx = Muxer::create(mc, [](span<const std::uint8_t>) {}, ec);
         if (!mx) { EXPECT(false, "PS 创建"); return; }
         StreamConfig s;
-        s.codec = Codec::h264;
+        s.codec = Codec::g711a;   // 音频区间 0xC0..0xDF，正好 32 个
         bool ok = true;
         for (int i = 0; i < 32; ++i) {
             if (!mx->addStream(s, ec)) { ok = false; break; }
         }
-        EXPECT(ok, "PS 前 32 条流应成功");
+        EXPECT(ok, "PS 前 32 条音频流应成功");
         const auto id = mx->addStream(s, ec);
         EXPECT(!id.has_value(), "PS 第 33 条流应失败");
         EXPECT(ec == MpegErrc::capacity_exceeded, "PS 超限应返回 capacity_exceeded");
