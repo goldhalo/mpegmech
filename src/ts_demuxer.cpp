@@ -80,6 +80,9 @@ void TsDemuxer::feed(const std::uint8_t* data, std::size_t len,
             // 失步：回到搜索态，从当前位置往后找
             ++m_resyncs;
             m_state = TsSyncState::searching;
+            // 未收完的 PES 与重新同步后的数据不同源，拼接只会产出坏帧，
+            // 整条丢弃（半条 PES 没有意义）。
+            m_pes.clear();
             ++m_scan;
             ++m_skipped;
             ++m_resync_skipped;
@@ -466,6 +469,9 @@ void TsDemuxer::reset()
     m_programs.clear();
     m_streams.clear();
     m_pes.clear();
+    // 部分 section 的拼接缓冲也要清：否则 reset 后第一个非 PUSI 包
+    // 会与旧残段拼在一起，可能解析出错误的 PAT/PMT。
+    m_psi.clear();
     m_skipped        = 0;
     m_resync_skipped = 0;
     m_resyncs = 0;

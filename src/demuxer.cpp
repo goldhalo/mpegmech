@@ -218,6 +218,10 @@ public:
             ++stats.parse_errors;
             return;
         }
+        // setHandler(nullptr) 会解绑回调；此时 feed 仍要消费数据（契约见
+        // demuxer.hpp 的 setHandler），只是不再回调 —— 空 std::function
+        // 直接调用会抛 std::bad_function_call 并炸穿 feed()。
+        if (!on_frame) { return; }
 
         const int   id    = ensure_stream(ps_sid, codec_by_stream_id(ps_sid));
         const Codec codec = codecs[id];
@@ -297,6 +301,7 @@ public:
                        const std::uint8_t* p, std::size_t n)
     {
         if (n == 0) { return; }
+        if (!on_frame) { return; }   // setHandler(nullptr) 之后不再回调
 
         FrameInfo fi;
         fi.stream_id = id;
@@ -461,6 +466,11 @@ public:
                 //   错误里永远只有 bytes_skipped 慢慢涨 —— 调用方完全不知道
                 //   自己喂进来的根本不是这两种容器（`unsupported_container`
                 //   这个错误码对 Demuxer 从不返回）。
+                //
+                // ★ 清空嗅探窗口：否则调用方继续 feed 时，每次都会把新数据
+                //   追加进 in 再返回同一个错误，缓冲随喂入量无界增长。
+                in.clear();
+                scan = 0;
                 return make_error_code(MpegErrc::unsupported_container);
             }
 
@@ -540,13 +550,15 @@ public:
             // ---- PackHeader (0xBA)：14 字节固定 ----
             if (code == 0xBA) {
                 if (state == State::searching) { state = State::synced; }
-                // 判据必须和下面的跳转量一致（都是 sc + 15）。
-                // 原先写 sc + 14：avail 恰好等于 sc + 14 时判为"够"，
-                // 但 scan 会落到 in.size() + 1 —— 正好触发上面那个下溢。
-                // （37 字节一块喂数据时很容易撞上，MSVC Debug 的
-                //   test_g711_ps 就是这样挂到 120 秒超时的。）
-                if (avail < sc + 15) { break; }
-                scan = code_at + 15;                     // 跳过整个 pack header
+                // PackHeader 总长 14 字节（4 字节起始码 + 10 字节字段），
+                // code_at 指向 BA，所以从 scan 起的跳转量是 14 = sc + 11。
+                //
+                // 以前写成 sc + 15 / code_at + 15（比正确值多 4 字节）：
+                // 紧随 PackHeader 的 PES 会被跳过 4 字节，整帧静默丢失。
+                // 本库自己产生的流因为后面跟着 SystemHeader + PSM，
+                // 多跳的 4 字节落进 SystemHeader 字段区，才"碰巧"没事。
+                if (avail < sc + 11) { break; }
+                scan = code_at + 11;                     // 跳过整个 pack header（14 字节）
                 continue;
             }
 
@@ -614,17 +626,24 @@ public:
             //   [E0][len 2][flags 2][hdr_len 1][PTS 5][DTS 5]
             //   code_at  +1,+2  +3,+4    +5     +6     +11
             //
-            //   ★ PTS_DTS_flags 在 flags 的第 1 字节的最高 2 位（code_at + 3），
-            //     不是 PTS 的首字节（那个高位是 '0010' 前缀）。
+            //   ★ PES 头有两个 flags 字节：
+            //       flags1 = code_at + 3（'10' + 加扰位，标准值 0x80）
+            //       flags2 = code_at + 4（PTS_DTS_flags 在最高 2 位）
+            //     以前读 code_at + 3，拿到 0x80 → pts_dts 恒为 2（"只有 PTS"），
+            //     DTS 永远解析不到、fi.dts 恒等于 pts（B 帧重排信息全丢）。
             std::int64_t pts = kNoTimestamp;
             std::int64_t dts = kNoTimestamp;
             if (hdr_len >= 5 && code_at + 6 + 5 <= in.size()) {
-                const std::uint8_t pes_flags = in[code_at + 3];
-                const int          pts_dts   = (pes_flags >> 6) & 0x03;
+                const std::uint8_t pes_flags2 = in[code_at + 4];
+                const int          pts_dts    = (pes_flags2 >> 6) & 0x03;
                 const std::uint8_t* h = in.data() + code_at + 6;
                 if (pts_dts == 0x02 || pts_dts == 0x03) {
                     pts = get_timestamp(h);
-                    if (pts_dts == 0x03 && hdr_len >= 10) {
+                    // DTS 在 h + 5，连读 5 字节；必须保证 hdr_len 与缓冲都够，
+                    // 否则畸形 PES（hdr_len=10 但 pes_len 很小、缓冲恰好截断）
+                    // 会越界读 4 字节。
+                    if (pts_dts == 0x03 && hdr_len >= 10 &&
+                        code_at + 6 + 10 <= in.size()) {
                         dts = get_timestamp(h + 5);
                     }
                 }

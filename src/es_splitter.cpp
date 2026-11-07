@@ -248,8 +248,14 @@ public:
                 break;                      // 起始码之后还没数据
             }
 
-            const NalKind kind = classify(in[nal_at], cfg.codec, in.data() + nal_at + 1,
-                                          in.size() - nal_at - 1);
+            // H.264 的 NAL 头 1 字节，slice header 紧跟其后；H.265 的 NAL
+            // 头是 **2 字节**（forbidden+type / layer_id+temporal_id），slice
+            // segment header 在 +2。以前统一 +1：H.265 的 first_slice 标志
+            // 读到了 NAL 头第 2 字节（几乎恒 0），无 AUD 的流永远切不出新帧。
+            const std::size_t nal_hdr = (cfg.codec == Codec::h265) ? 2 : 1;
+            const NalKind kind = classify(in[nal_at], cfg.codec,
+                                          in.data() + nal_at + nal_hdr,
+                                          in.size() - nal_at - nal_hdr);
 
             if (!dropped_leading) {
                 // ★ 非开头输入：第一个起始码**不一定是帧开头** —— 也可能是
