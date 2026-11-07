@@ -94,7 +94,12 @@ public:
     }
 
     [[nodiscard]] constexpr iterator begin() const noexcept { return data_; }
-    [[nodiscard]] constexpr iterator end() const noexcept { return data_ + size_; }
+    /// 空视图返回 data_ 本身，避免 `nullptr + 0` 这种未定义行为
+    /// （UBSan 的 pointer-overflow 检查会报）。
+    [[nodiscard]] constexpr iterator end() const noexcept
+    {
+        return size_ == 0 ? data_ : data_ + size_;
+    }
 
     /// 取子视图（越界自动截断，不抛异常）。
     [[nodiscard]] constexpr span subspan(size_type offset,
@@ -102,7 +107,8 @@ public:
     {
         const size_type off = offset > size_ ? size_ : offset;
         const size_type max = size_ - off;
-        return span(data_ + off, count > max ? max : count);
+        // off == 0 时不要做 data_ + 0（data_ 可能是 nullptr）。
+        return span(off == 0 ? data_ : data_ + off, count > max ? max : count);
     }
 
     /// 从头取 count 个元素。

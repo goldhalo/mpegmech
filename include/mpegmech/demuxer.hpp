@@ -18,7 +18,7 @@
 //
 //  ── 同步策略 ────────────────────────────────────────────────────────────────
 //  TS：找 k 使 data[k] == 0x47 且 data[k+188] == 0x47 且 data[k+376] == 0x47
-//      （连续包数由 `ts_sync_packets` 配置，默认 3）。命中后以 k 为包边界，
+//      （固定要求连续 3 个包；没有单独的配置项）。命中后以 k 为包边界，
 //      [0, k) 计入 bytes_skipped。运行期若某个包的 sync_byte 不是 0x47，
 //      立即回到搜索态（计入 resyncs），而不是继续按 188 硬切。
 //  PS：找 `00 00 01 BA`。MPEG-2 的 pack_header 在每个 pack 起始，MPEG-1 兼容
@@ -100,16 +100,10 @@ struct DemuxerConfig {
 
     /// 单帧上限（字节）。超长视为异常帧：**整帧丢弃**、计 parse_errors。
     ///
-    /// @note 文档以前写的是"截断后以 incomplete 标志吐出"，但
-    ///       ① 实现是直接丢弃；② `FrameInfo` 里根本没有 incomplete 字段。
-    ///       丢弃对解码器其实更友好（半帧解码只会花屏）—— 这里把文本改成事实。
+    /// @note 实现是**直接丢弃**（不会吐截断帧）。`FrameFlag::incomplete`
+    ///       只在 `flush()` 交出残帧时置位（PS / TS 一致），与本配置无关。
     /// 默认 4 MiB（1080p IDR 通常 < 1 MiB）。
     std::size_t max_frame_bytes = 4u * 1024u * 1024u;
-
-    /// TS 判定同步所需的连续包数（>= 2）。
-    ///
-    /// @warning **当前未实现**：同步判定硬编码为 3 个连续 0x47（间隔 188），
-    ///          这个字段不被读取。改它不会有任何效果。
 
     /// 连续失步达到该字节数即认为本流已无法恢复，feed() 返回 sync_lost。
     /// 默认 256 KiB。设为 0 表示永不放弃（一直搜索）。
@@ -120,8 +114,8 @@ struct DemuxerConfig {
     /// 默认 false —— 截断的帧对下游没有价值，且可能被误当完整帧解码。
     /// PS / TS **两条路径都遵守**这个开关（以前 TS 侧无条件吐）。
     ///
-    /// @note 吐出的残帧**不带** incomplete 标志（`FrameInfo` 里没有这个字段），
-    ///       所以打开它意味着"调用方自己保证能识别半帧"。
+    /// @note 吐出的残帧**带** `FrameFlag::incomplete`（`FrameInfo::flags`
+    ///       的 bit），调用方可据此决定是否送解码器。
     bool emit_partial_on_flush = false;
 
     /// 是否在 `aud` 边界切分视频帧（TS/PS 里一帧可能含多个 AUD）。

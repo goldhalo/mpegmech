@@ -144,7 +144,7 @@ public:
     // ---- TS 专用状态 ----
     detail::TsDemuxer            ts;
     std::map<std::uint16_t, int> ts_pid_to_id;   ///< TS PID → 库内 stream_id
-    std::uint64_t                ts_frame_errors = 0;  ///< TS 路径下超长帧丢弃数
+    std::uint64_t                ts_frame_errors = 0;  ///< TS 路径下的帧错误数（超长丢弃、AAC 尾部无法成帧等）
 
     enum class State { searching, synced };
     State state = State::searching;
@@ -298,7 +298,8 @@ public:
     /// 发出一个 TS 帧（统一填 FrameInfo、计统计）。
     void push_ts_frame(int id, Codec codec, std::uint16_t program,
                        std::int64_t pts, std::int64_t dts,
-                       const std::uint8_t* p, std::size_t n)
+                       const std::uint8_t* p, std::size_t n,
+                       bool incomplete = false)
     {
         if (n == 0) { return; }
         if (!on_frame) { return; }   // setHandler(nullptr) 之后不再回调
@@ -307,12 +308,18 @@ public:
         fi.stream_id = id;
         fi.codec     = codec;
         fi.pts       = pts;
-        fi.dts       = dts;
+        // 与 PS 路径（emit_frame）统一：没有 DTS 时按 pts 处理，
+        // 否则 FrameInfo.dts 会漏出 kNoTimestamp 哨兵值。
+        fi.dts       = (dts == kNoTimestamp) ? pts : dts;
         fi.program   = program;
         if (isAudio(codec)) {
             fi.flags = fi.flags | FrameFlag::key;      // 音频帧恒可作为起点
         } else if (looks_key(codec, p, n)) {
             fi.flags = fi.flags | FrameFlag::key;
+        }
+        if (incomplete) {
+            fi.flags = fi.flags | FrameFlag::incomplete;
+            ++stats.incomplete_frames;
         }
 
         ++stats.frames_out;
@@ -320,7 +327,8 @@ public:
     }
 
     /// 把 TS 解出的帧派发出去。
-    std::error_code dispatch_ts(std::vector<detail::TsDemuxer::Frame>& frames)
+    std::error_code dispatch_ts(std::vector<detail::TsDemuxer::Frame>& frames,
+                                bool incomplete = false)
     {
         // 先把流表同步到最新。PMT 一定先于该 PID 的 PES 被解析，所以在这里
         // 同步能保证"stream 回调早于该流的第一帧"这条契约。
@@ -367,15 +375,19 @@ public:
                                    : 0;
                     }
                     if (flen > cfg.max_frame_bytes) { ++ts_frame_errors; }
-                    else { push_ts_frame(id, codec, f.program, pts, pts, h, flen); }
+                    else { push_ts_frame(id, codec, f.program, pts, pts, h, flen,
+                                         incomplete); }
 
                     if (pts != kNoTimestamp && step > 0) { pts += step; }
                     i += flen;
                 }
+                // 循环因非 ADTS 数据提前 break：剩余尾部成不了帧，计错误，
+                // 免得静默丢弃（以前完全无痕）。
+                if (i != 0 && i < total) { ++ts_frame_errors; }
                 if (i == 0) {   // 不是 ADTS：原样透传，别把数据吞掉
                     if (total > cfg.max_frame_bytes) { ++ts_frame_errors; }
                     else { push_ts_frame(id, codec, f.program, f.pts, f.dts,
-                                         f.payload.data(), total); }
+                                         f.payload.data(), total, incomplete); }
                 }
                 continue;
             }
@@ -385,7 +397,7 @@ public:
                 continue;
             }
             push_ts_frame(id, codec, f.program, f.pts, f.dts,
-                         f.payload.data(), f.payload.size());
+                          f.payload.data(), f.payload.size(), incomplete);
         }
 
         stats.bytes_skipped = ts.bytes_skipped();
@@ -716,16 +728,25 @@ public:
             }
             std::vector<detail::TsDemuxer::Frame> frames;
             ts.flush(frames);
-            return dispatch_ts(frames);
+            // flush 交出的必然是残帧：标 incomplete，与 PS 路径一致。
+            return dispatch_ts(frames, /*incomplete=*/true);
+        }
+
+        // 嗅探都没完成就 flush：残留是原始垃圾，不是某条 ES 的残帧，直接丢。
+        if (detected == Container::unknown) {
+            in.clear();
+            scan  = 0;
+            state = State::searching;
+            return {};
         }
 
         // 不吐残缺帧（emit_partial_on_flush=false 时的行为）
-        if (cfg.emit_partial_on_flush) {
-            // 剩余未解析的当作一帧
-            if (scan < in.size()) {
-                emit_frame(0xE0, in.data() + scan, in.size() - scan,
-                           kNoTimestamp, kNoTimestamp, true);
-            }
+        if (cfg.emit_partial_on_flush && scan < in.size()) {
+            // 残帧按"已知的第一条流"标注：硬编码 0xE0 会把纯音频流错标成
+            // 视频（codec 也会被兜底猜成 H.264）。
+            const std::uint8_t ps_sid = streams.empty() ? 0xE0 : streams.begin()->first;
+            emit_frame(ps_sid, in.data() + scan, in.size() - scan,
+                       kNoTimestamp, kNoTimestamp, true);
         }
         in.clear();
         scan  = 0;

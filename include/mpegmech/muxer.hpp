@@ -117,7 +117,7 @@ struct MuxStats {
     std::uint64_t frames_in    = 0;  ///< write() 成功入队的帧数
     std::uint64_t bytes_in     = 0;  ///< 入队 ES 的总字节
     std::uint64_t bytes_out    = 0;  ///< 回调交出的总字节
-    std::uint64_t packets_out  = 0;  ///< TS: 188 字节包数；PS: pack 数
+    std::uint64_t packets_out  = 0;  ///< TS: 188 字节包数；PS: 写出的 PES 数
     std::uint64_t psi_sent     = 0;  ///< PAT/PMT 发送次数（PS: PSM 次数）
     /// PCR 插入次数。**恒为 0**（PCR 未实现）。
     /// PS 下因单帧超过 PES 长度上限（65535）被拒的帧数。

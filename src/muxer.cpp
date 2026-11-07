@@ -61,6 +61,9 @@ public:
     // TS：PAT/PMT 的 cc
     std::uint8_t pat_cc = 0;
     std::uint8_t pmt_cc = 0;
+    /// PSI 版本号（5 位循环）。addStream 改变流表时 +1 —— 版本不变的话，
+    /// 解码器会按旧表继续解释 PID，新加的流永远解不出来。
+    std::uint8_t psi_version = 0;
     std::uint64_t frames_since_psi = 0;
     std::uint16_t pcr_pid = 0;
     bool          ts_psi_sent_once = false;
@@ -97,7 +100,7 @@ public:
     {
         std::vector<std::pair<std::uint16_t, std::uint16_t>> progs;
         progs.emplace_back(cfg.program_number, cfg.pmt_pid);
-        detail::build_pat(buf, cfg.program_number, progs, 0, pat_cc);
+        detail::build_pat(buf, cfg.program_number, progs, psi_version & 0x1F, pat_cc);
 
         std::vector<detail::TsEsEntry> es;
         for (const auto& s : streams) {
@@ -105,7 +108,7 @@ public:
         }
         detail::build_pmt(buf, cfg.program_number, cfg.pmt_pid,
                           pcr_pid != 0 ? pcr_pid : (es.empty() ? 0 : es[0].elementary_pid),
-                          es, 0, pmt_cc);
+                          es, psi_version & 0x1F, pmt_cc);
 
         ++stats.psi_sent;
         frames_since_psi = 0;
@@ -126,7 +129,7 @@ public:
         if (cfg.ps_system_header) {
             detail::build_system_header(buf, detail::kDefaultMuxRate, sys);
         }
-        detail::build_psm(buf, psm, 0);
+        detail::build_psm(buf, psm, psi_version & 0x1F);
         ++stats.psi_sent;
     }
 
@@ -273,6 +276,33 @@ public:
             return make_error_code(MpegErrc::invalid_argument);
         }
 
+        // 容量上限（见 error.hpp：TS 单节目 16 路 / PS 32 路）。
+        // 以前不检查，capacity_exceeded 这个错误码从来没有返回点。
+        const std::size_t max_streams = (cfg.container == Container::ts) ? 16u : 32u;
+        if (streams.size() >= max_streams) {
+            return make_error_code(MpegErrc::capacity_exceeded);
+        }
+
+        // 显式指定的 PID / stream_id 不能重复，也不能占用保留值。
+        if (cfg.container == Container::ts) {
+            if (sc.pid != 0) {
+                if (sc.pid == cfg.pmt_pid || sc.pid == 0x1FFF) {
+                    return make_error_code(MpegErrc::invalid_argument);
+                }
+                for (const auto& s : streams) {
+                    if (s.pid == sc.pid) {
+                        return make_error_code(MpegErrc::invalid_argument);
+                    }
+                }
+            }
+        } else if (sc.stream_id != 0) {
+            for (const auto& s : streams) {
+                if (s.stream_id == sc.stream_id) {
+                    return make_error_code(MpegErrc::invalid_argument);
+                }
+            }
+        }
+
         StreamState st;
         st.cfg = sc;
         st.id  = static_cast<int>(streams.size());
@@ -322,6 +352,10 @@ public:
 
         streams.push_back(std::move(st));
         out_id = streams.back().id;
+
+        // 流表已变化：PSI 版本号 +1（5 位循环），下次发送 PAT/PMT/PSM 时
+        // 解码器才会重新加载。不递增时晚加的流对端永远看不到。
+        psi_version = static_cast<std::uint8_t>((psi_version + 1) & 0x1F);
 
         // TS：第一条视频流默认当 PCR 载体
         if (cfg.container == Container::ts && pcr_pid == 0 && isVideo(sc.codec)) {

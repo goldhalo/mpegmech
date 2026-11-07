@@ -13,6 +13,8 @@
 // =============================================================================
 #include "ps_muxer.hpp"
 
+#include "ts_muxer.hpp"   // crc32_mpeg2
+
 #include <cstring>
 #include <vector>
 #include <cstddef>
@@ -162,8 +164,12 @@ void build_psm(Bytes& out, const std::vector<PsmStreamEntry>& streams,
         out.push_back(0);                                  // info_length 低
     }
 
-    // CRC32 占位（GB28181 平台多数不校验，但字段要在）
-    put32(out, 0);
+    // CRC32：覆盖 length 字段之后的整段 PSM（到 CRC 之前）。
+    // 以前写 0 —— 多数平台不校验，但严格解析器会直接判整张 PSM 非法；
+    // 我们已有 PAT/PMT 同款 MPEG-2 CRC32，顺手算对。
+    const std::uint32_t crc = detail::crc32_mpeg2(
+        out.data() + len_pos + 2, out.size() - (len_pos + 2));
+    put32(out, crc);
 
     const std::size_t body_len = out.size() - len_pos - 2;
     out[len_pos]     = static_cast<std::uint8_t>((body_len >> 8) & 0xFF);
