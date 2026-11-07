@@ -133,7 +133,7 @@ cmake -S . -B build -DMPEGMECH_BUILD_EXAMPLES=ON
 | `test_h264_aud.h264` | 带 AUD 的 H.264 裸流 |
 | `test_nob.h265` | H.265 裸流 |
 | `test.aac` | ADTS 封装的 AAC |
-| `ff_av.ts` | ffmpeg 打的 TS（验证"能读别人的流"）：`ffmpeg -y -i test_h264_aud.h264 -i test.aac -c copy -map 0:v -map 1:a ff_av.ts` |
+| `ff_av.ts` | ffmpeg 打的 TS（验证"能读别人的流"）：`ffmpeg -y -f lavfi -i testsrc2=size=320x240:rate=25 -f lavfi -i sine=frequency=440:sample_rate=44100:duration=3 -t 3 -c:v libx264 -x264-params aud=1 -pix_fmt yuv420p -c:a aac -b:a 64k ff_av.ts`（注意：把 raw H.264 用 `-c copy` 打进 TS 会因缺 PTS 失败） |
 
 ### 稳定性
 

@@ -147,7 +147,10 @@ void test_leading_partial_dropped()
     //
     // 这不算 bug：IDR 本身就是完整一帧，只是缺了 AUD 这个"分隔符"。真实
     // 设备送的裸流也经常这样（第一个 IDR 前面没有 AUD）。
-    EXPECT(frames == 75, "1 个无 AUD 的 IDR + 74 个 AUD = 75 帧");
+    // 期望值从素材推导（整体切帧数 = 起始残片之后的完整帧数）：
+    // 以前硬编码 75，换一份帧数不同的素材就必然假失败。
+    const std::size_t expected = count_frames(raw, Codec::h264, 0);
+    EXPECT(frames == expected, "起始残片之后的帧数应与整体一致");
 }
 
 // -----------------------------------------------------------------------------

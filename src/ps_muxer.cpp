@@ -91,31 +91,75 @@ void build_pack_header(Bytes& out, std::int64_t scr_90k, std::uint32_t mux_rate)
 void build_system_header(Bytes& out, std::uint32_t mux_rate,
                          const std::vector<SystemStreamEntry>& streams)
 {
+    // ISO/IEC 13818-1 §6.2.2 的 SystemHeader 是**位级布局**：
+    //   固定部分 45 位（marker/rate_bound/marker/audio_bound/fixed/CSPS/
+    //   video_bound/restriction/reserved），之后每条流 24 位
+    //   （stream_id 8 + '11' 2 + scale 1 + bound 13）。
+    // 45 不是 8 的倍数 —— 逐字节 push_back 一定写错（以前的实现就是这样：
+    // audio_bound/video_bound 位置全错，只是多数解码器不读 SystemHeader 才没暴露）。
+    struct BitWriter {
+        Bytes         buf;
+        std::uint32_t acc   = 0;
+        int           nbits = 0;
+        void put(std::uint32_t v, int n)
+        {
+            for (int i = n - 1; i >= 0; --i) {
+                acc = (acc << 1) | ((v >> i) & 1u);
+                if (++nbits == 8) {
+                    buf.push_back(static_cast<std::uint8_t>(acc));
+                    acc   = 0;
+                    nbits = 0;
+                }
+            }
+        }
+        void flush()
+        {
+            if (nbits != 0) {
+                buf.push_back(static_cast<std::uint8_t>((acc << (8 - nbits)) & 0xFF));
+                acc   = 0;
+                nbits = 0;
+            }
+        }
+    } bw;
+
+    // 流类型按 stream_id 区间统计：视频 0xE0..0xEF、音频 0xC0..0xDF。
+    std::uint32_t video_n = 0;
+    std::uint32_t audio_n = 0;
+    for (const auto& s : streams) {
+        if (s.stream_id >= 0xE0 && s.stream_id <= 0xEF) { ++video_n; }
+        else if (s.stream_id >= 0xC0 && s.stream_id <= 0xDF) { ++audio_n; }
+    }
+
+    bw.put(1, 1);                                 // marker_bit
+    bw.put(mux_rate & 0x3FFFFFu, 22);             // rate_bound（单位 50 bytes/s）
+    bw.put(1, 1);                                 // marker_bit
+    bw.put(audio_n & 0x3Fu, 6);                   // audio_bound
+    bw.put(1, 1);                                 // fixed_flag
+    bw.put(0, 1);                                 // CSPS_flag
+    bw.put(video_n & 0x1Fu, 5);                   // video_bound
+    bw.put(1, 1);                                 // packet_rate_restriction_flag
+    bw.put(0x7Fu, 7);                             // reserved_bits（全 1）
+
+    for (const auto& s : streams) {
+        bw.put(s.stream_id, 8);
+        bw.put(0x3u, 2);                          // '11' reserved
+        // P-STD_buffer_bound_scale = 1（1024 字节单位）
+        const std::uint32_t bound = (s.bs_buffer_bound + 1023u) / 1024u;
+        bw.put(1, 1);
+        bw.put(bound & 0x1FFFu, 13);
+    }
+    bw.flush();
+
     out.push_back(0x00);
     out.push_back(0x00);
     out.push_back(0x01);
     out.push_back(0xBB);
-    const std::size_t len_pos = out.size();                // 长度字段的**起始**位置
-    out.push_back(0);                                      // 长度占位（高字节）
-    out.push_back(0);                                      // 长度占位（低字节）
+    const std::size_t len_pos = out.size();
+    out.push_back(0);
+    out.push_back(0);
+    out.insert(out.end(), bw.buf.begin(), bw.buf.end());
 
-    // rate_bound（22 位）+ marker
-    out.push_back(static_cast<std::uint8_t>(0x80 | ((mux_rate >> 15) & 0x7F)));
-    out.push_back(static_cast<std::uint8_t>((mux_rate >> 7) & 0xFF));
-    out.push_back(static_cast<std::uint8_t>(((mux_rate << 1) & 0xFE) | 0x01));
-
-    out.push_back(static_cast<std::uint8_t>(streams.size()));  // audio_bound
-    out.push_back(0xE0);                                   // fixed_flag=1, CSPS_flag=1
-    out.push_back(0xFF);                                   // video_bound
-    out.push_back(0x7F);                                   // packet_rate_restriction
-
-    for (const auto& s : streams) {
-        out.push_back(s.stream_id);
-        out.push_back(static_cast<std::uint8_t>(0xC0 | (s.bs_buffer_bound >> 8)));
-        out.push_back(static_cast<std::uint8_t>(s.bs_buffer_bound & 0xFF));
-    }
-
-    // 长度字段 = 它自己之后的字节数（不含这 2 字节）
+    // header_length = 它自己之后的字节数（不含这 2 字节）
     const std::size_t body_len = out.size() - len_pos - 2;
     out[len_pos]     = static_cast<std::uint8_t>((body_len >> 8) & 0xFF);
     out[len_pos + 1] = static_cast<std::uint8_t>(body_len & 0xFF);

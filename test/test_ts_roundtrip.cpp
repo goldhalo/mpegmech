@@ -82,6 +82,39 @@ std::FILE* create_out(const char* name)
     return std::fopen(p.c_str(), "wb");
 }
 
+/// 数 AnnexB 里 AUD（H.264 NAL type 9）的个数 = 完整帧数。
+std::size_t count_h264_aud(const std::vector<std::uint8_t>& raw)
+{
+    std::size_t n = 0;
+    for (std::size_t i = 0; i + 3 < raw.size(); ++i) {
+        if (raw[i] == 0 && raw[i + 1] == 0 && raw[i + 2] == 1 &&
+            (raw[i + 3] & 0x1F) == 9) {
+            ++n;
+        }
+    }
+    return n;
+}
+
+/// 数 ADTS 帧数（按 frame_length 跳）。
+std::size_t count_adts(const std::vector<std::uint8_t>& raw)
+{
+    std::size_t n = 0;
+    std::size_t i = 0;
+    while (i + 7 <= raw.size()) {
+        if (raw[i] != 0xFF || (raw[i + 1] & 0xF0) != 0xF0) {
+            ++i;
+            continue;
+        }
+        const std::size_t flen = (static_cast<std::size_t>(raw[i + 3] & 0x03) << 11) |
+                                 (static_cast<std::size_t>(raw[i + 4]) << 3) |
+                                 ((raw[i + 5] >> 5) & 0x07);
+        if (flen < 7) { ++i; continue; }
+        ++n;
+        i += flen;
+    }
+    return n;
+}
+
 /// 一帧 ES（录制下来的，用于比对）
 struct Rec {
     int                       stream_id = 0;
@@ -436,8 +469,12 @@ int main()
             EXPECT(errors == 0, "第三方流无结构错误");
             EXPECT(dx->container() == Container::ts, "嗅探出 TS");
 
-            // 视频帧数必须和源文件一致（ffmpeg 是 -c copy，没重新编码）
-            EXPECT(g.size() == 2 && g[0].size() == 75, "视频帧数与源一致（75）");
+            // 视频帧数必须和源文件一致（ffmpeg 是 -c copy，没重新编码）。
+            // 期望值从素材推导，不写死（换素材不会假失败）。
+            const auto src_v = read_file("test_h264_aud.h264");
+            const std::size_t video_expected = count_h264_aud(src_v);
+            EXPECT(video_expected > 0, "应能读到 H.264 素材");
+            EXPECT(g.size() == 2 && g[0].size() == video_expected, "视频帧数与源一致");
 
             // 音频：ffmpeg 把几十个 ADTS 帧攒成一条 PES，解出来必须是**单帧**，
             // 而不是"一坨 ADTS"。判据：首帧头合法，且 frame_length == 整个 payload。
@@ -460,7 +497,9 @@ int main()
                             ag->size(), badhdr, multi);
                 EXPECT(badhdr == 0, "音频帧头合法");
                 EXPECT(multi == 0, "每条 PES 里的 ADTS 已拆成单帧");
-                EXPECT(ag->size() == 88, "音频帧数与源一致（88）");
+                const std::size_t audio_expected = count_adts(read_file("test.aac"));
+                EXPECT(audio_expected > 0, "应能读到 AAC 素材");
+                EXPECT(ag->size() == audio_expected, "音频帧数与源一致");
             }
         }
     }

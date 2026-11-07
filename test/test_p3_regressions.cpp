@@ -199,6 +199,65 @@ void test_psm_good_crc_accepted()
 }
 
 // ---------------------------------------------------------------------------
+// T12：SystemHeader 位布局（45 位固定头 + 24 位/流）
+// ---------------------------------------------------------------------------
+void test_system_header_layout()
+{
+    std::vector<std::uint8_t> sh;
+    detail::build_system_header(sh, 80000, {{0xE0, 32 * 1024}, {0xC0, 32 * 1024}});
+
+    std::size_t i = 0;
+    for (; i + 4 <= sh.size(); ++i) {
+        if (sh[i] == 0 && sh[i + 1] == 0 && sh[i + 2] == 1 && sh[i + 3] == 0xBB) {
+            break;
+        }
+    }
+    EXPECT(i + 4 <= sh.size(), "应能找到 SystemHeader 起始码");
+    if (i + 4 > sh.size()) { return; }
+
+    const std::size_t body = i + 4;
+    const std::size_t len = (static_cast<std::size_t>(sh[body]) << 8) | sh[body + 1];
+    EXPECT(body + 2 + len == sh.size(), "header_length 应等于其后的字节数");
+
+    struct BitReader {
+        const std::uint8_t* p;
+        std::size_t         nbits;
+        std::size_t         pos = 0;
+        bool get(std::uint32_t& out, int n)
+        {
+            out = 0;
+            for (int k = 0; k < n; ++k) {
+                if (pos >= nbits) { return false; }
+                out = (out << 1) | ((p[pos >> 3] >> (7 - (pos & 7))) & 1u);
+                ++pos;
+            }
+            return true;
+        }
+    } br{sh.data() + body + 2, len * 8};
+
+    std::uint32_t marker = 0, rate = 0, marker2 = 0, audio = 0, fixed = 0,
+                  csps = 0, video = 0, restr = 0, reserved = 0;
+    EXPECT(br.get(marker, 1) && marker == 1, "marker_bit");
+    EXPECT(br.get(rate, 22) && rate == 80000, "rate_bound");
+    EXPECT(br.get(marker2, 1) && marker2 == 1, "第二个 marker_bit");
+    EXPECT(br.get(audio, 6) && audio == 1, "audio_bound == 1");
+    EXPECT(br.get(fixed, 1) && fixed == 1, "fixed_flag");
+    EXPECT(br.get(csps, 1) && csps == 0, "CSPS_flag");
+    EXPECT(br.get(video, 5) && video == 1, "video_bound == 1");
+    EXPECT(br.get(restr, 1) && restr == 1, "packet_rate_restriction_flag");
+    EXPECT(br.get(reserved, 7) && reserved == 0x7F, "reserved_bits 全 1");
+
+    const std::uint32_t expect_ids[2] = {0xE0, 0xC0};
+    for (int k = 0; k < 2; ++k) {
+        std::uint32_t sid = 0, rsrv = 0, scale = 0, bound = 0;
+        EXPECT(br.get(sid, 8) && sid == expect_ids[k], "流条目 stream_id");
+        EXPECT(br.get(rsrv, 2) && rsrv == 3, "流条目 '11'");
+        EXPECT(br.get(scale, 1) && scale == 1, "P-STD_buffer_bound_scale");
+        EXPECT(br.get(bound, 13) && bound == 32, "P-STD_buffer_size_bound");
+    }
+}
+
+// ---------------------------------------------------------------------------
 // T9：缺 PSM 时不再按 stream_id 猜 codec
 // ---------------------------------------------------------------------------
 void test_codec_fallback_unknown()
@@ -265,6 +324,7 @@ int main()
     std::printf("=== mpegmech P3 回归用例 ===\n");
     test_pat_bad_crc_rejected();
     test_pmt_bad_crc_rejected();
+    test_system_header_layout();
     test_psm_bad_crc_rejected();
     test_psm_good_crc_accepted();
     test_codec_fallback_unknown();

@@ -14,6 +14,20 @@ using namespace mpegmech;
 
 namespace {
 int g_fail = 0;
+
+/// 数 AnnexB 里 AUD（H.264 NAL type 9）的个数 = 完整帧数。
+/// 期望值从素材推导，避免写死帧数（换素材即假失败）。
+std::size_t count_aud(const std::vector<std::uint8_t>& raw)
+{
+    std::size_t n = 0;
+    for (std::size_t i = 0; i + 3 < raw.size(); ++i) {
+        if (raw[i] == 0 && raw[i + 1] == 0 && raw[i + 2] == 1 &&
+            (raw[i + 3] & 0x1F) == 9) {
+            ++n;
+        }
+    }
+    return n;
+}
 #define EXPECT(c, m) do { if (!(c)) { std::printf("  [FAIL] %s (line %d)\n", (m), __LINE__); ++g_fail; } } while (0)
 
 std::vector<std::uint8_t> read_file(const char* p)
@@ -74,7 +88,7 @@ int main()
     mx->flush();
 
     std::printf("  帧数 %zu，PS 输出 %zu 字节\n", frames, ps.size());
-    EXPECT(frames == 75, "应切出 75 帧");
+    EXPECT(frames == count_aud(raw), "切出帧数应等于 AUD 个数");
     EXPECT(!ps.empty(), "PS 非空");
 
     // 4. 校验 PS 起始码存在

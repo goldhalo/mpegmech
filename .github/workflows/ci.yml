@@ -37,6 +37,28 @@ jobs:
             clang++ --version || { echo "::error::runner 上没有预装 clang++"; exit 1; }
           fi
 
+      # 生成测试素材：缺失时依赖素材的往返/切分用例会自行跳过，覆盖率虚高。
+      # 命令与 README「测试素材」一致；ffmpeg 缺了就装（runner 镜像通常已带）。
+      - name: 生成测试素材（ffmpeg）
+        run: |
+          command -v ffmpeg >/dev/null || sudo apt-get install -y ffmpeg
+          ffmpeg -y -hide_banner -loglevel error \
+            -f lavfi -i testsrc2=size=320x240:rate=25 -t 3 \
+            -c:v libx264 -x264-params aud=1 -pix_fmt yuv420p -f h264 /tmp/test_h264_aud.h264
+          ffmpeg -y -hide_banner -loglevel error \
+            -f lavfi -i testsrc2=size=320x240:rate=25 -t 3 \
+            -c:v libx265 -x265-params aud=0 -pix_fmt yuv420p -f hevc /tmp/test_nob.h265 2>/dev/null
+          ffmpeg -y -hide_banner -loglevel error \
+            -f lavfi -i sine=frequency=440:sample_rate=44100:duration=3 \
+            -c:a aac -b:a 64k -f adts /tmp/test.aac
+          # 直接用 lavfi 编码成 TS：把 raw H.264 用 -c copy 打进 TS 时
+          # ffmpeg 会因"first pts and dts value must be set"失败。
+          ffmpeg -y -hide_banner -loglevel error \
+            -f lavfi -i testsrc2=size=320x240:rate=25 \
+            -f lavfi -i sine=frequency=440:sample_rate=44100:duration=3 -t 3 \
+            -c:v libx264 -x264-params aud=1 -pix_fmt yuv420p \
+            -c:a aac -b:a 64k /tmp/ff_av.ts
+
       - name: 配置
         run: |
           if [ "${{ matrix.compiler }}" = "gcc" ]; then
@@ -165,6 +187,24 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y cmake ninja-build g++
 
+      # 生成测试素材：缺失时依赖素材的往返/切分用例会自行跳过，覆盖率虚高。
+      # 命令与 README「测试素材」一致；ffmpeg 缺了就装（runner 镜像通常已带）。
+      - name: 生成测试素材（ffmpeg）
+        run: |
+          command -v ffmpeg >/dev/null || sudo apt-get install -y ffmpeg
+          ffmpeg -y -hide_banner -loglevel error \
+            -f lavfi -i testsrc2=size=320x240:rate=25 -t 3 \
+            -c:v libx264 -x264-params aud=1 -pix_fmt yuv420p -f h264 /tmp/test_h264_aud.h264
+          ffmpeg -y -hide_banner -loglevel error \
+            -f lavfi -i testsrc2=size=320x240:rate=25 -t 3 \
+            -c:v libx265 -x265-params aud=0 -pix_fmt yuv420p -f hevc /tmp/test_nob.h265 2>/dev/null
+          ffmpeg -y -hide_banner -loglevel error \
+            -f lavfi -i sine=frequency=440:sample_rate=44100:duration=3 \
+            -c:a aac -b:a 64k -f adts /tmp/test.aac
+          ffmpeg -y -hide_banner -loglevel error -fflags +genpts \
+            -i /tmp/test_h264_aud.h264 -i /tmp/test.aac \
+            -c copy -map 0:v -map 1:a /tmp/ff_av.ts
+
       - name: 配置（Debug + sanitizer）
         run: |
           cmake -S . -B build-san -G Ninja \
@@ -203,10 +243,8 @@ jobs:
   #
   # 2026-11 首次跑是 0 条，所以**不留 suppression**：再报就是真问题。
   #
-  # ⚠ 注意：CI 上没有 /tmp 下的测试素材，依赖素材的用例会自行"跳过并返回 0"。
-  #    这个 job 实际覆盖到的是 test_main / test_ts_multiprogram /
-  #    test_split_invariance / test_ps_oversize 这四个不依赖素材的用例。
-  #    （"缺素材即跳过"本身是个已知盲区，单独处理。）
+  # 测试素材由前面的 ffmpeg 步骤生成；若该步骤失败/跳过，依赖素材的用例
+  # 会自行"跳过并返回 0"、覆盖率缩水 —— 看「生成测试素材」步骤的输出即可确认。
   # ---------------------------------------------------------------------------
   tsan:
     name: TSan
@@ -221,6 +259,24 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y cmake ninja-build g++
+
+      # 生成测试素材：缺失时依赖素材的往返/切分用例会自行跳过，覆盖率虚高。
+      # 命令与 README「测试素材」一致；ffmpeg 缺了就装（runner 镜像通常已带）。
+      - name: 生成测试素材（ffmpeg）
+        run: |
+          command -v ffmpeg >/dev/null || sudo apt-get install -y ffmpeg
+          ffmpeg -y -hide_banner -loglevel error \
+            -f lavfi -i testsrc2=size=320x240:rate=25 -t 3 \
+            -c:v libx264 -x264-params aud=1 -pix_fmt yuv420p -f h264 /tmp/test_h264_aud.h264
+          ffmpeg -y -hide_banner -loglevel error \
+            -f lavfi -i testsrc2=size=320x240:rate=25 -t 3 \
+            -c:v libx265 -x265-params aud=0 -pix_fmt yuv420p -f hevc /tmp/test_nob.h265 2>/dev/null
+          ffmpeg -y -hide_banner -loglevel error \
+            -f lavfi -i sine=frequency=440:sample_rate=44100:duration=3 \
+            -c:a aac -b:a 64k -f adts /tmp/test.aac
+          ffmpeg -y -hide_banner -loglevel error -fflags +genpts \
+            -i /tmp/test_h264_aud.h264 -i /tmp/test.aac \
+            -c copy -map 0:v -map 1:a /tmp/ff_av.ts
 
       - name: 配置（Debug + TSan）
         run: |
